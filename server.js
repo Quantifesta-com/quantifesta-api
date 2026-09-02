@@ -1,303 +1,231 @@
-// ╔══════════════════════════════════════════════════════════╗
-// ║  QUANTIFESTA — Railway Backend Server                   ║
-// ║  Secure Binance API integration                         ║
-// ║  Deploy this to Railway as server.js                    ║
-// ╚══════════════════════════════════════════════════════════╝
-
 const http = require("http");
-const crypto = require("crypto");
 const https = require("https");
-const url = require("url");
+const crypto = require("crypto");
 
 const PORT = process.env.PORT || 3000;
-const BINANCE_API_KEY = process.env.BINANCE_API_KEY || "";
-const BINANCE_SECRET = process.env.BINANCE_SECRET || "";
-const FRONTEND_URL = process.env.FRONTEND_URL || "*";
-const BINANCE_BASE = "https://api.binance.com";
+const CB_API_KEY = process.env.COINBASE_API_KEY || "";
+const CB_SECRET = process.env.COINBASE_SECRET || "";
 
-// ── HMAC-SHA256 signature (required by Binance for private endpoints) ──
-function sign(queryString) {
-  return crypto
-    .createHmac("sha256", BINANCE_SECRET)
-    .update(queryString)
-    .digest("hex");
-}
+// ── Coinbase Advanced Trade API helper ──────────────────────
+function cbRequest(method, path, body = null) {
+  return new Promise((resolve, reject) => {
+    const timestamp = Math.floor(Date.now() / 1000).toString();
+    const bodyStr = body ? JSON.stringify(body) : "";
+    const message = timestamp + method + path + bodyStr;
+    const signature = crypto
+      .createHmac("sha256", CB_SECRET)
+      .update(message)
+      .digest("hex");
 
-// ── Make a signed Binance API request ──────────────────────
-function binanceRequest(path, params, method) {
-  method = method || "GET";
-  const timestamp = Date.now();
-  const paramStr = Object.entries(Object.assign({}, params, { timestamp }))
-    .map(function(e) { return e[0] + "=" + e[1]; })
-    .join("&");
-  const signature = sign(paramStr);
-  const fullQuery = paramStr + "&signature=" + signature;
-  const fullPath = path + "?" + fullQuery;
-
-  return new Promise(function(resolve, reject) {
     const options = {
-      hostname: "api.binance.com",
-      path: fullPath,
+      hostname: "api.coinbase.com",
+      path: path,
       method: method,
       headers: {
-        "X-MBX-APIKEY": BINANCE_API_KEY,
         "Content-Type": "application/json",
+        "CB-ACCESS-KEY": CB_API_KEY,
+        "CB-ACCESS-SIGN": signature,
+        "CB-ACCESS-TIMESTAMP": timestamp,
       },
     };
-    const req = https.request(options, function(res) {
+
+    const req = https.request(options, (res) => {
       let data = "";
-      res.on("data", function(chunk) { data += chunk; });
-      res.on("end", function() {
+      res.on("data", (chunk) => (data += chunk));
+      res.on("end", () => {
         try { resolve(JSON.parse(data)); }
-        catch(e) { reject(new Error("Invalid JSON: " + data)); }
+        catch { resolve({ error: data }); }
       });
     });
     req.on("error", reject);
+    if (bodyStr) req.write(bodyStr);
     req.end();
   });
 }
 
-// ── Public Binance request (no signature needed) ───────────
-function binancePublic(path, params) {
-  const query = params ? "?" + Object.entries(params).map(function(e) { return e[0] + "=" + e[1]; }).join("&") : "";
-  return new Promise(function(resolve, reject) {
-    https.get("https://api.binance.com" + path + query, {
-      headers: { "X-MBX-APIKEY": BINANCE_API_KEY }
-    }, function(res) {
-      let data = "";
-      res.on("data", function(chunk) { data += chunk; });
-      res.on("end", function() {
-        try { resolve(JSON.parse(data)); }
-        catch(e) { reject(new Error("Invalid JSON")); }
-      });
-    }).on("error", reject);
+// ── Binance public price (no auth needed) ───────────────────
+function binancePrice(symbol) {
+  return new Promise((resolve) => {
+    const req = https.get(
+      `https://api.binance.com/api/v3/ticker/24hr?symbol=${symbol}`,
+      (res) => {
+        let data = "";
+        res.on("data", (c) => (data += c));
+        res.on("end", () => {
+          try {
+            const d = JSON.parse(data);
+            resolve({
+              usd: parseFloat(d.lastPrice),
+              change24h: parseFloat(d.priceChangePercent),
+              high24h: parseFloat(d.highPrice),
+              low24h: parseFloat(d.lowPrice),
+              volume24h: parseFloat(d.quoteVolume),
+            });
+          } catch { resolve(null); }
+        });
+      }
+    );
+    req.on("error", () => resolve(null));
   });
 }
 
-// ── CORS headers ────────────────────────────────────────────
-function setCORS(res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+function binanceKlines(symbol, interval = "1h", limit = 60) {
+  return new Promise((resolve) => {
+    const req = https.get(
+      `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`,
+      (res) => {
+        let data = "";
+        res.on("data", (c) => (data += c));
+        res.on("end", () => {
+          try {
+            const raw = JSON.parse(data);
+            resolve(raw.map((k) => ({
+              t: k[0], o: parseFloat(k[1]), h: parseFloat(k[2]),
+              l: parseFloat(k[3]), c: parseFloat(k[4]), v: parseFloat(k[5]),
+            })));
+          } catch { resolve([]); }
+        });
+      }
+    );
+    req.on("error", () => resolve([]));
+  });
 }
 
-// ── Send JSON response ──────────────────────────────────────
-function sendJSON(res, data, status) {
-  res.writeHead(status || 200, { "Content-Type": "application/json" });
+// ── CORS helper ─────────────────────────────────────────────
+function cors(res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+}
+
+function json(res, data, status = 200) {
+  cors(res);
+  res.writeHead(status, { "Content-Type": "application/json" });
   res.end(JSON.stringify(data));
 }
 
-// ── Route handlers ──────────────────────────────────────────
+// ── Server ───────────────────────────────────────────────────
+const server = http.createServer(async (req, res) => {
+  if (req.method === "OPTIONS") { cors(res); res.writeHead(204); res.end(); return; }
 
-// GET /health — check server is alive
-async function handleHealth(res) {
-  sendJSON(res, {
-    status: "ok",
-    service: "Quantifesta API",
-    timestamp: new Date().toISOString(),
-    binance: BINANCE_API_KEY ? "configured" : "missing",
-  });
-}
+  const url = new URL(req.url, `http://localhost`);
+  const path = url.pathname;
 
-// GET /prices — real prices from Binance
-async function handlePrices(res) {
-  try {
-    const symbols = ["SOLUSDT", "ETHUSDT", "BTCUSDT"];
-    const results = await Promise.all(
-      symbols.map(function(s) {
-        return binancePublic("/api/v3/ticker/24hr", { symbol: s });
-      })
-    );
-    const prices = {};
-    results.forEach(function(r) {
-      const sym = r.symbol.replace("USDT", "");
-      prices[sym] = {
-        usd: parseFloat(r.lastPrice),
-        change24h: parseFloat(r.priceChangePercent),
-        high24h: parseFloat(r.highPrice),
-        low24h: parseFloat(r.lowPrice),
-        volume24h: parseFloat(r.quoteVolume),
-        bidPrice: parseFloat(r.bidPrice),
-        askPrice: parseFloat(r.askPrice),
-        lastUpdate: new Date().toISOString(),
-      };
-    });
-    sendJSON(res, { success: true, prices });
-  } catch(e) {
-    sendJSON(res, { success: false, error: e.message }, 500);
+  // Health
+  if (path === "/health") {
+    return json(res, { success: true, exchange: "coinbase", status: "live", ts: new Date().toISOString() });
   }
-}
 
-// GET /account — real Binance account balances
-async function handleAccount(res) {
-  try {
-    const account = await binanceRequest("/api/v3/account", {});
-    const balances = account.balances
-      .filter(function(b) { return parseFloat(b.free) > 0 || parseFloat(b.locked) > 0; })
-      .map(function(b) {
-        return {
-          asset: b.asset,
-          free: parseFloat(b.free),
-          locked: parseFloat(b.locked),
-          total: parseFloat(b.free) + parseFloat(b.locked),
-        };
-      });
-    sendJSON(res, {
-      success: true,
-      balances,
-      canTrade: account.canTrade,
-      accountType: account.accountType,
-      permissions: account.permissions,
-    });
-  } catch(e) {
-    sendJSON(res, { success: false, error: e.message }, 500);
-  }
-}
-
-// GET /orderbook?symbol=SOLUSDT — real order book
-async function handleOrderbook(res, query) {
-  try {
-    const symbol = query.symbol || "SOLUSDT";
-    const data = await binancePublic("/api/v3/depth", { symbol, limit: 10 });
-    sendJSON(res, {
-      success: true,
-      symbol,
-      bids: data.bids.map(function(b) { return { price: parseFloat(b[0]), qty: parseFloat(b[1]) }; }),
-      asks: data.asks.map(function(a) { return { price: parseFloat(a[0]), qty: parseFloat(a[1]) }; }),
-    });
-  } catch(e) {
-    sendJSON(res, { success: false, error: e.message }, 500);
-  }
-}
-
-// GET /klines?symbol=SOLUSDT&interval=1h — candlestick data
-async function handleKlines(res, query) {
-  try {
-    const symbol = query.symbol || "SOLUSDT";
-    const interval = query.interval || "1h";
-    const limit = query.limit || 48;
-    const data = await binancePublic("/api/v3/klines", { symbol, interval, limit });
-    const candles = data.map(function(k) {
-      return {
-        t: k[0],
-        o: parseFloat(k[1]),
-        h: parseFloat(k[2]),
-        l: parseFloat(k[3]),
-        c: parseFloat(k[4]),
-        v: parseFloat(k[5]),
-      };
-    });
-    sendJSON(res, { success: true, symbol, interval, candles });
-  } catch(e) {
-    sendJSON(res, { success: false, error: e.message }, 500);
-  }
-}
-
-// POST /order — place a real spot order
-async function handleOrder(req, res) {
-  let body = "";
-  req.on("data", function(chunk) { body += chunk; });
-  req.on("end", async function() {
+  // Prices (Binance public — no auth needed)
+  if (path === "/prices") {
     try {
-      const params = JSON.parse(body);
-      // Safety checks
-      if (!params.symbol) return sendJSON(res, { success: false, error: "symbol required" }, 400);
-      if (!params.side) return sendJSON(res, { success: false, error: "side required (BUY/SELL)" }, 400);
-      if (!params.quantity) return sendJSON(res, { success: false, error: "quantity required" }, 400);
-
-      const orderParams = {
-        symbol: params.symbol,           // e.g. SOLUSDT
-        side: params.side,               // BUY or SELL
-        type: params.type || "MARKET",   // MARKET or LIMIT
-        quantity: params.quantity,       // amount to trade
-      };
-
-      // Add price for LIMIT orders
-      if (params.type === "LIMIT" && params.price) {
-        orderParams.price = params.price;
-        orderParams.timeInForce = "GTC";
-      }
-
-      const order = await binanceRequest("/api/v3/order", orderParams, "POST");
-      sendJSON(res, {
-        success: true,
-        orderId: order.orderId,
-        symbol: order.symbol,
-        side: order.side,
-        status: order.status,
-        executedQty: order.executedQty,
-        cummulativeQuoteQty: order.cummulativeQuoteQty,
-        fills: order.fills,
-      });
-    } catch(e) {
-      sendJSON(res, { success: false, error: e.message }, 500);
+      const [SOL, ETH, BTC] = await Promise.all([
+        binancePrice("SOLUSDT"),
+        binancePrice("ETHUSDT"),
+        binancePrice("BTCUSDT"),
+      ]);
+      return json(res, { success: true, prices: { SOL, ETH, BTC } });
+    } catch (e) {
+      return json(res, { success: false, error: e.message });
     }
-  });
-}
-
-// GET /trades?symbol=SOLUSDT — recent trade history
-async function handleTrades(res, query) {
-  try {
-    const symbol = query.symbol || "SOLUSDT";
-    const data = await binanceRequest("/api/v3/myTrades", { symbol, limit: 20 });
-    const trades = data.map(function(t) {
-      return {
-        id: t.id,
-        symbol: t.symbol,
-        side: t.isBuyer ? "BUY" : "SELL",
-        price: parseFloat(t.price),
-        qty: parseFloat(t.qty),
-        total: parseFloat(t.quoteQty),
-        commission: parseFloat(t.commission),
-        commissionAsset: t.commissionAsset,
-        time: new Date(t.time).toISOString(),
-      };
-    });
-    sendJSON(res, { success: true, trades });
-  } catch(e) {
-    sendJSON(res, { success: false, error: e.message }, 500);
   }
-}
 
-// ── Main server ─────────────────────────────────────────────
-const server = http.createServer(async function(req, res) {
-  setCORS(res);
+  // Klines (Binance public)
+  if (path === "/klines") {
+    const symbol = url.searchParams.get("symbol") || "SOLUSDT";
+    const interval = url.searchParams.get("interval") || "1h";
+    const limit = parseInt(url.searchParams.get("limit") || "60");
+    const candles = await binanceKlines(symbol, interval, limit);
+    return json(res, { success: true, candles });
+  }
 
-  // Handle preflight
-  if (req.method === "OPTIONS") {
-    res.writeHead(204);
-    res.end();
+  // Account (Coinbase)
+  if (path === "/account") {
+    try {
+      const data = await cbRequest("GET", "/api/v3/brokerage/accounts");
+      if (data.accounts) {
+        const balances = data.accounts
+          .filter((a) => parseFloat(a.available_balance?.value || 0) > 0)
+          .map((a) => ({
+            asset: a.currency,
+            free: parseFloat(a.available_balance?.value || 0),
+            locked: parseFloat(a.hold?.value || 0),
+            total: parseFloat(a.available_balance?.value || 0) + parseFloat(a.hold?.value || 0),
+          }));
+        return json(res, { success: true, balances, exchange: "coinbase" });
+      }
+      return json(res, { success: false, error: "No accounts found", raw: data });
+    } catch (e) {
+      return json(res, { success: false, error: e.message });
+    }
+  }
+
+  // Place order (Coinbase)
+  if (path === "/order" && req.method === "POST") {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", async () => {
+      try {
+        const { symbol, side, quantity, type, price } = JSON.parse(body);
+        // Convert SOLUSDT → SOL-USDT for Coinbase
+        const productId = symbol.replace("USDT", "-USDT");
+        const clientOrderId = `qf-${Date.now()}`;
+
+        const orderConfig = type === "LIMIT"
+          ? { limit_limit_gtc: { base_size: String(quantity), limit_price: String(price), post_only: false } }
+          : { market_market_ioc: { base_size: String(quantity) } };
+
+        const payload = {
+          client_order_id: clientOrderId,
+          product_id: productId,
+          side: side === "BUY" ? "BUY" : "SELL",
+          order_configuration: orderConfig,
+        };
+
+        const result = await cbRequest("POST", "/api/v3/brokerage/orders", payload);
+
+        if (result.success) {
+          return json(res, {
+            success: true,
+            orderId: result.order_id || clientOrderId,
+            status: result.order?.status || "FILLED",
+            executedQty: String(quantity),
+            cummulativeQuoteQty: String(quantity * (price || 0)),
+            exchange: "coinbase",
+          });
+        }
+        return json(res, { success: false, error: result.error_response?.message || result.error || JSON.stringify(result) });
+      } catch (e) {
+        return json(res, { success: false, error: e.message });
+      }
+    });
     return;
   }
 
-  const parsed = url.parse(req.url, true);
-  const path = parsed.pathname;
-  const query = parsed.query;
-
-  console.log(req.method + " " + path);
-
-  try {
-    if (path === "/health" && req.method === "GET") return await handleHealth(res);
-    if (path === "/prices" && req.method === "GET") return await handlePrices(res);
-    if (path === "/account" && req.method === "GET") return await handleAccount(res);
-    if (path === "/orderbook" && req.method === "GET") return await handleOrderbook(res, query);
-    if (path === "/klines" && req.method === "GET") return await handleKlines(res, query);
-    if (path === "/trades" && req.method === "GET") return await handleTrades(res, query);
-    if (path === "/order" && req.method === "POST") return await handleOrder(req, res);
-
-    sendJSON(res, {
-      service: "Quantifesta API",
-      version: "1.0.0",
-      endpoints: ["/health", "/prices", "/account", "/orderbook", "/klines", "/trades", "/order"],
-    }, 404);
-  } catch(e) {
-    console.error(e);
-    sendJSON(res, { success: false, error: "Server error: " + e.message }, 500);
+  // Trades history (Coinbase)
+  if (path === "/trades") {
+    try {
+      const symbol = url.searchParams.get("symbol") || "SOLUSDT";
+      const productId = symbol.replace("USDT", "-USDT");
+      const data = await cbRequest("GET", `/api/v3/brokerage/orders/historical/fills?product_id=${productId}&limit=20`);
+      if (data.fills) {
+        const trades = data.fills.map((f) => ({
+          id: f.trade_id,
+          time: new Date(f.trade_time).getTime(),
+          side: f.side,
+          price: parseFloat(f.price),
+          qty: parseFloat(f.size),
+          total: parseFloat(f.price) * parseFloat(f.size),
+        }));
+        return json(res, { success: true, trades });
+      }
+      return json(res, { success: true, trades: [] });
+    } catch (e) {
+      return json(res, { success: false, error: e.message });
+    }
   }
+
+  json(res, { error: "Not found" }, 404);
 });
 
-server.listen(PORT, function() {
-  console.log("Quantifesta API server running on port " + PORT);
-  console.log("Binance API: " + (BINANCE_API_KEY ? "configured ✓" : "MISSING ✗"));
-  console.log("Endpoints: /health /prices /account /orderbook /klines /trades /order");
-});
+server.listen(PORT, () => console.log(`Quantifesta API (Coinbase) running on port ${PORT}`));
