@@ -1,10 +1,13 @@
 {
   "name": "quantifesta-api",
   "version": "1.0.0",
-  "description": "Quantifesta secure Binance API backend",
+  "description": "Quantifesta secure Coinbase trading API",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
+  },
+  "dependencies": {
+    "jsonwebtoken": "^9.0.2"
   },
   "engines": {
     "node": ">=18.0.0"
