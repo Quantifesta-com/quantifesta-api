@@ -6,21 +6,26 @@ const PORT = process.env.PORT || 3000;
 const CB_KEY_NAME = process.env.COINBASE_API_KEY || "";
 const RAW_SECRET = process.env.COINBASE_SECRET || "";
 
-function makeJWT(method, path) {
+functfunction makeJWT(method, path) {
   const now = Math.floor(Date.now() / 1000);
   const header = { alg:"ES256", kid:CB_KEY_NAME, nonce:crypto.randomBytes(16).toString("hex") };
   const payload = { iss:"cdp", nbf:now, exp:now+120, sub:CB_KEY_NAME, uri:`${method} api.coinbase.com${path}` };
   const b64u = (s) => Buffer.from(s).toString("base64").replace(/\+/g,"-").replace(/\//g,"_").replace(/=/g,"");
   const toSign = `${b64u(JSON.stringify(header))}.${b64u(JSON.stringify(payload))}`;
   const keyBuf = Buffer.from(RAW_SECRET, "base64");
-  // Build SEC1 DER: 30 77 02 01 01 04 20 [32 bytes priv] a0 0a 06 08 [P-256 OID]
   const privBytes = keyBuf.slice(0, 32);
-  const sec1 = Buffer.concat([
-    Buffer.from([0x30,0x77,0x02,0x01,0x01,0x04,0x20]),
-    privBytes,
-    Buffer.from([0xa0,0x0a,0x06,0x08,0x2a,0x86,0x48,0xce,0x3d,0x03,0x01,0x07])
+  const pkcs8 = Buffer.concat([
+    Buffer.from([
+      0x30,0x41,0x02,0x01,0x00,
+      0x30,0x13,
+      0x06,0x07,0x2a,0x86,0x48,0xce,0x3d,0x02,0x01,
+      0x06,0x08,0x2a,0x86,0x48,0xce,0x3d,0x03,0x01,0x07,
+      0x04,0x27,
+      0x30,0x25,0x02,0x01,0x01,0x04,0x20
+    ]),
+    privBytes
   ]);
-  const privateKey = crypto.createPrivateKey({ key: sec1, format:"der", type:"sec1" });
+  const privateKey = crypto.createPrivateKey({ key:pkcs8, format:"der", type:"pkcs8" });
   const sig = crypto.sign("SHA256", Buffer.from(toSign), { key:privateKey, dsaEncoding:"ieee-p1363" });
   return `${toSign}.${b64u(sig)}`;
 }
