@@ -3,56 +3,36 @@ const https = require("https");
 const crypto = require("crypto");
 
 const PORT = process.env.PORT || 3000;
-const CB_KEY_ID = process.env.COINBASE_API_KEY || "";
+const CB_KEY_NAME = process.env.COINBASE_API_KEY || "";
 const RAW_SECRET = process.env.COINBASE_SECRET || "";
 
-function buildPrivateKey() {
-  const buf = Buffer.from(RAW_SECRET, "base64");
-  try { return crypto.createPrivateKey({ key: buf, format: "der", type: "pkcs8" }); } catch {}
-  try { return crypto.createPrivateKey({ key: buf, format: "der", type: "sec1" }); } catch {}
-  const priv = buf.slice(0, 32);
-  const der = Buffer.concat([Buffer.from([0x30,0x41,0x02,0x01,0x00,0x30,0x13,0x06,0x07,0x2a,0x86,0x48,0xce,0x3d,0x02,0x01,0x06,0x08,0x2a,0x86,0x48,0xce,0x3d,0x03,0x01,0x07,0x04,0x27,0x30,0x25,0x02,0x01,0x01,0x04,0x20]), priv]);
-  try { return crypto.createPrivateKey({ key: der, format: "der", type: "pkcs8" }); } catch {}
-  const priv2 = buf.slice(buf.length - 32);
-  const der2 = Buffer.concat([Buffer.from([0x30,0x41,0x02,0x01,0x00,0x30,0x13,0x06,0x07,0x2a,0x86,0x48,0xce,0x3d,0x02,0x01,0x06,0x08,0x2a,0x86,0x48,0xce,0x3d,0x03,0x01,0x07,0x04,0x27,0x30,0x25,0x02,0x01,0x01,0x04,0x20]), priv2]);
-  try { return crypto.createPrivateKey({ key: der2, format: "der", type: "pkcs8" }); } catch {}
-  return null;
-}
-
-function base64url(buf) {
-  return buf.toString("base64").replace(/\+/g,"-").replace(/\//g,"_").replace(/=/g,"");
-}
-
 function makeJWT(method, path) {
-  const privateKey = buildPrivateKey();
-  if (!privateKey) throw new Error("Cannot parse private key");
   const now = Math.floor(Date.now() / 1000);
-  const header = { alg:"ES256", kid:CB_KEY_ID, nonce:crypto.randomBytes(16).toString("hex") };
-  const payload = { iss:"cdp", nbf:now, exp:now+120, sub:CB_KEY_ID, uri:`${method} api.coinbase.com${path}` };
-  const toSign = `${base64url(Buffer.from(JSON.stringify(header)))}.${base64url(Buffer.from(JSON.stringify(payload)))}`;
+  const header = { alg:"ES256", kid:CB_KEY_NAME, nonce:crypto.randomBytes(16).toString("hex") };
+  const payload = { iss:"cdp", nbf:now, exp:now+120, sub:CB_KEY_NAME, uri:`${method} api.coinbase.com${path}` };
+  const b64u = (s) => Buffer.from(s).toString("base64").replace(/\+/g,"-").replace(/\//g,"_").replace(/=/g,"");
+  const toSign = `${b64u(JSON.stringify(header))}.${b64u(JSON.stringify(payload))}`;
+  const keyBuf = Buffer.from(RAW_SECRET, "base64");
+  // Build SEC1 DER: 30 77 02 01 01 04 20 [32 bytes priv] a0 0a 06 08 [P-256 OID]
+  const privBytes = keyBuf.slice(0, 32);
+  const sec1 = Buffer.concat([
+    Buffer.from([0x30,0x77,0x02,0x01,0x01,0x04,0x20]),
+    privBytes,
+    Buffer.from([0xa0,0x0a,0x06,0x08,0x2a,0x86,0x48,0xce,0x3d,0x03,0x01,0x07])
+  ]);
+  const privateKey = crypto.createPrivateKey({ key: sec1, format:"der", type:"sec1" });
   const sig = crypto.sign("SHA256", Buffer.from(toSign), { key:privateKey, dsaEncoding:"ieee-p1363" });
-  return `${toSign}.${base64url(sig)}`;
-}
-
-function makeHMACHeaders(method, path, body="") {
-  const timestamp = Math.floor(Date.now()/1000).toString();
-  const message = timestamp + method + path + body;
-  const secret = Buffer.from(RAW_SECRET, "base64");
-  const sig = crypto.createHmac("sha256", secret).update(message).digest("base64");
-  return { "CB-ACCESS-KEY":CB_KEY_ID, "CB-ACCESS-SIGN":sig, "CB-ACCESS-TIMESTAMP":timestamp };
+  return `${toSign}.${b64u(sig)}`;
 }
 
 function cbRequest(method, path, body=null) {
   return new Promise((resolve, reject) => {
     const bodyStr = body ? JSON.stringify(body) : "";
-    let headers = { "Content-Type":"application/json", "Content-Length":Buffer.byteLength(bodyStr) };
-    try {
-      const token = makeJWT(method, path);
-      headers["Authorization"] = `Bearer ${token}`;
-    } catch(e) {
-      Object.assign(headers, makeHMACHeaders(method, path, bodyStr));
-    }
-    const options = { hostname:"api.coinbase.com", path, method, headers };
+    const token = makeJWT(method, path);
+    const options = {
+      hostname:"api.coinbase.com", path, method,
+      headers: { "Content-Type":"application/json", "Authorization":`Bearer ${token}`, "Content-Length":Buffer.byteLength(bodyStr) }
+    };
     const req = https.request(options, (res) => {
       let data=""; res.on("data",(c)=>(data+=c));
       res.on("end",()=>{ try{resolve(JSON.parse(data));}catch{resolve({error:data});} });
@@ -150,4 +130,4 @@ http.createServer(async(req,res)=>{
   }
 
   json(res,{error:"Not found"},404);
-}).listen(PORT,()=>console.log(`Quantifesta API (Coinbase) on port ${PORT}`));
+}).listen(PORT,()=>console.log(`Quantifesta API on port ${PORT}`));
