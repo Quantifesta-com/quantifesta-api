@@ -6,7 +6,7 @@ const PORT = process.env.PORT || 3000;
 const CB_KEY_NAME = process.env.COINBASE_API_KEY || "";
 const RAW_SECRET = process.env.COINBASE_SECRET || "";
 
-functfunction makeJWT(method, path) {
+function makeJWT(method, path) {
   const now = Math.floor(Date.now() / 1000);
   const header = { alg:"ES256", kid:CB_KEY_NAME, nonce:crypto.randomBytes(16).toString("hex") };
   const payload = { iss:"cdp", nbf:now, exp:now+120, sub:CB_KEY_NAME, uri:`${method} api.coinbase.com${path}` };
@@ -15,14 +15,7 @@ functfunction makeJWT(method, path) {
   const keyBuf = Buffer.from(RAW_SECRET, "base64");
   const privBytes = keyBuf.slice(0, 32);
   const pkcs8 = Buffer.concat([
-    Buffer.from([
-      0x30,0x41,0x02,0x01,0x00,
-      0x30,0x13,
-      0x06,0x07,0x2a,0x86,0x48,0xce,0x3d,0x02,0x01,
-      0x06,0x08,0x2a,0x86,0x48,0xce,0x3d,0x03,0x01,0x07,
-      0x04,0x27,
-      0x30,0x25,0x02,0x01,0x01,0x04,0x20
-    ]),
+    Buffer.from([0x30,0x41,0x02,0x01,0x00,0x30,0x13,0x06,0x07,0x2a,0x86,0x48,0xce,0x3d,0x02,0x01,0x06,0x08,0x2a,0x86,0x48,0xce,0x3d,0x03,0x01,0x07,0x04,0x27,0x30,0x25,0x02,0x01,0x01,0x04,0x20]),
     privBytes
   ]);
   const privateKey = crypto.createPrivateKey({ key:pkcs8, format:"der", type:"pkcs8" });
@@ -77,7 +70,7 @@ http.createServer(async(req,res)=>{
   const url=new URL(req.url,"http://localhost");
   const path=url.pathname;
 
-  if(path==="/health") return json(res,{success:true,exchange:"coinbase",status:"live",ts:new Date().toISOString()});
+  if(path==="/health") return json(res,{success:true,status:"live",ts:new Date().toISOString()});
 
   if(path==="/prices"){
     try{const[SOL,ETH,BTC]=await Promise.all([binancePrice("SOLUSDT"),binancePrice("ETHUSDT"),binancePrice("BTCUSDT")]);
