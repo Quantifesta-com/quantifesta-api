@@ -4,7 +4,7 @@ const crypto = require("crypto");
 
 const PORT = process.env.PORT || 3000;
 const CB_KEY_NAME = process.env.COINBASE_API_KEY || "";
-const RAW_SECRET = process.env.COINBASE_SECRET || "";
+const keyBuf = Buffer.from(RAW_SECRET.trim(), "base64url");
 
 function makeJWT(method, path) {
   const now = Math.floor(Date.now() / 1000);
