@@ -1,52 +1,216 @@
-const http=require("http"),https=require("https"),crypto=require("crypto");
-const PORT=process.env.PORT||3000;
-const KEY=process.env.COINBASE_API_KEY||"";
-const SEC=process.env.COINBASE_SECRET||"";
+const http = require("http");
+const https = require("https");
 
-function jwt(method,path){
-  const now=Math.floor(Date.now()/1000);
-  const hdr={alg:"ES256",kid:KEY,nonce:crypto.randomBytes(16).toString("hex")};
-  const pay={iss:"cdp",nbf:now,exp:now+120,sub:KEY,uri:`${method} api.coinbase.com${path}`};
-  const u=(s)=>Buffer.from(s).toString("base64").replace(/\+/g,"-").replace(/\//g,"_").replace(/=/g,"");
-  const msg=`${u(JSON.stringify(hdr))}.${u(JSON.stringify(pay))}`;
-  const raw=Buffer.from(SEC.trim(),"base64url");
-  const p=raw.slice(0,32);
-  const der=Buffer.concat([Buffer.from([0x30,0x41,0x02,0x01,0x00,0x30,0x13,0x06,0x07,0x2a,0x86,0x48,0xce,0x3d,0x02,0x01,0x06,0x08,0x2a,0x86,0x48,0xce,0x3d,0x03,0x01,0x07,0x04,0x27,0x30,0x25,0x02,0x01,0x01,0x04,0x20]),p]);
-  const k=crypto.createPrivateKey({key:der,format:"der",type:"pkcs8"});
-  const s=crypto.sign("SHA256",Buffer.from(msg),{key:k,dsaEncoding:"ieee-p1363"});
-  return `${msg}.${u(s)}`;
-}
+const PORT = process.env.PORT || 3000;
+const HELIUS_RPC = process.env.HELIUS_RPC || "https://mainnet.helius-rpc.com/?api-key=5887995d-86e5-4f50-8558-c53a988d4ec2";
+const JUP_API_KEY = process.env.JUP_API_KEY || "jup_4e01628c96dcadffcf9d5ab360837152bdfc984674151b077d280b7107d9f315";
 
-function cb(method,path,body=null){
-  return new Promise((res,rej)=>{
-    const b=body?JSON.stringify(body):"";
-    const t=jwt(method,path);
-    const r=https.request({hostname:"api.coinbase.com",path,method,headers:{"Content-Type":"application/json","Authorization":`Bearer ${t}`,"Content-Length":Buffer.byteLength(b)}},(rs)=>{
-      let d="";rs.on("data",c=>d+=c);rs.on("end",()=>{try{res(JSON.parse(d));}catch{res({error:d});}});
-    });
-    r.on("error",rej);if(b)r.write(b);r.end();
+// ── HTTP helpers ─────────────────────────────────────────────
+function get(url) {
+  return new Promise((resolve, reject) => {
+    https.get(url, { headers: { "x-api-key": JUP_API_KEY } }, (res) => {
+      let d = ""; res.on("data", c => d += c);
+      res.on("end", () => { try { resolve(JSON.parse(d)); } catch { resolve({ error: d }); } });
+    }).on("error", reject);
   });
 }
 
-function bp(sym){return new Promise(r=>{https.get(`https://api.binance.com/api/v3/ticker/24hr?symbol=${sym}`,rs=>{let d="";rs.on("data",c=>d+=c);rs.on("end",()=>{try{const x=JSON.parse(d);r({usd:+x.lastPrice,change24h:+x.priceChangePercent,high24h:+x.highPrice,low24h:+x.lowPrice,volume24h:+x.quoteVolume});}catch{r(null);}});}).on("error",()=>r(null));});}
-function bk(sym,iv="1h",lim=60){return new Promise(r=>{https.get(`https://api.binance.com/api/v3/klines?symbol=${sym}&interval=${iv}&limit=${lim}`,rs=>{let d="";rs.on("data",c=>d+=c);rs.on("end",()=>{try{r(JSON.parse(d).map(k=>({t:k[0],o:+k[1],h:+k[2],l:+k[3],c:+k[4],v:+k[5]})));}catch{r([]);}});}).on("error",()=>r([]));});}
+function post(url, body, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const data = JSON.stringify(body);
+    const u = new URL(url);
+    const opts = {
+      hostname: u.hostname, path: u.pathname + u.search, method: "POST",
+      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(data), "x-api-key": JUP_API_KEY, ...headers }
+    };
+    const req = https.request(opts, (res) => {
+      let d = ""; res.on("data", c => d += c);
+      res.on("end", () => { try { resolve(JSON.parse(d)); } catch { resolve({ error: d }); } });
+    });
+    req.on("error", reject);
+    req.write(data); req.end();
+  });
+}
 
-function cors(r){r.setHeader("Access-Control-Allow-Origin","*");r.setHeader("Access-Control-Allow-Methods","GET,POST,OPTIONS");r.setHeader("Access-Control-Allow-Headers","Content-Type");}
-function out(r,d,s=200){cors(r);r.writeHead(s,{"Content-Type":"application/json"});r.end(JSON.stringify(d));}
+function rpc(method, params = []) {
+  return post(HELIUS_RPC, { jsonrpc: "2.0", id: 1, method, params });
+}
 
-http.createServer(async(req,res)=>{
-  if(req.method==="OPTIONS"){cors(res);res.writeHead(204);res.end();return;}
-  const u=new URL(req.url,"http://x"),p=u.pathname;
-  if(p==="/health")return out(res,{ok:true,ts:new Date().toISOString()});
-  if(p==="/debug"){
-    let bytes=0,ok=false,err="";
-    try{const b=Buffer.from(SEC.trim(),"base64url");bytes=b.length;const pr=b.slice(0,32);const d=Buffer.concat([Buffer.from([0x30,0x41,0x02,0x01,0x00,0x30,0x13,0x06,0x07,0x2a,0x86,0x48,0xce,0x3d,0x02,0x01,0x06,0x08,0x2a,0x86,0x48,0xce,0x3d,0x03,0x01,0x07,0x04,0x27,0x30,0x25,0x02,0x01,0x01,0x04,0x20]),pr]);crypto.createPrivateKey({key:d,format:"der",type:"pkcs8"});ok=true;}catch(e){err=e.message;}
-    return out(res,{secretLen:SEC.length,secretStart:SEC.slice(0,20),decodedBytes:bytes,pkcs8ok:ok,err});
+// ── Binance public prices ────────────────────────────────────
+function binancePrice(symbol) {
+  return new Promise((resolve) => {
+    https.get(`https://api.binance.com/api/v3/ticker/24hr?symbol=${symbol}`, (res) => {
+      let d = ""; res.on("data", c => d += c);
+      res.on("end", () => {
+        try {
+          const x = JSON.parse(d);
+          resolve({ usd: +x.lastPrice, change24h: +x.priceChangePercent, high24h: +x.highPrice, low24h: +x.lowPrice, volume24h: +x.quoteVolume });
+        } catch { resolve(null); }
+      });
+    }).on("error", () => resolve(null));
+  });
+}
+
+function binanceKlines(symbol, interval = "1h", limit = 60) {
+  return new Promise((resolve) => {
+    https.get(`https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`, (res) => {
+      let d = ""; res.on("data", c => d += c);
+      res.on("end", () => {
+        try { resolve(JSON.parse(d).map(k => ({ t: k[0], o: +k[1], h: +k[2], l: +k[3], c: +k[4], v: +k[5] }))); }
+        catch { resolve([]); }
+      });
+    }).on("error", () => resolve([]));
+  });
+}
+
+// ── Token mints ──────────────────────────────────────────────
+const TOKENS = {
+  SOL:  "So11111111111111111111111111111111111111112",
+  USDC: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+  USDT: "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+  ETH:  "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs",
+  BTC:  "9n4nbM75f5Ui33ZbPYXn59EwSgE8CGsHtAeTH5YFeJ9E",
+};
+
+function cors(r) {
+  r.setHeader("Access-Control-Allow-Origin", "*");
+  r.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  r.setHeader("Access-Control-Allow-Headers", "Content-Type");
+}
+function out(r, d, s = 200) {
+  cors(r); r.writeHead(s, { "Content-Type": "application/json" });
+  r.end(JSON.stringify(d));
+}
+
+// ── Server ───────────────────────────────────────────────────
+http.createServer(async (req, res) => {
+  if (req.method === "OPTIONS") { cors(res); res.writeHead(204); res.end(); return; }
+  const u = new URL(req.url, "http://x"), p = u.pathname;
+
+  // Health
+  if (p === "/health") return out(res, { ok: true, exchange: "jupiter+helius", ts: new Date().toISOString() });
+
+  // Prices (Binance public)
+  if (p === "/prices") {
+    try {
+      const [SOL, ETH, BTC] = await Promise.all([binancePrice("SOLUSDT"), binancePrice("ETHUSDT"), binancePrice("BTCUSDT")]);
+      return out(res, { success: true, prices: { SOL, ETH, BTC } });
+    } catch (e) { return out(res, { success: false, error: e.message }); }
   }
-  if(p==="/prices"){try{const[S,E,B]=await Promise.all([bp("SOLUSDT"),bp("ETHUSDT"),bp("BTCUSDT")]);return out(res,{success:true,prices:{SOL:S,ETH:E,BTC:B}});}catch(e){return out(res,{success:false,error:e.message});}}
-  if(p==="/klines"){const s=u.searchParams.get("symbol")||"SOLUSDT";return out(res,{success:true,candles:await bk(s,u.searchParams.get("interval")||"1h",+(u.searchParams.get("limit")||60))});}
-  if(p==="/account"){try{const d=await cb("GET","/api/v3/brokerage/accounts");if(d.accounts){const b=d.accounts.filter(a=>+(a.available_balance?.value||0)>0||+(a.hold?.value||0)>0).map(a=>({asset:a.currency,free:+(a.available_balance?.value||0),locked:+(a.hold?.value||0),total:+(a.available_balance?.value||0)+ +(a.hold?.value||0)}));return out(res,{success:true,balances:b});}return out(res,{success:false,error:"Auth failed",raw:d});}catch(e){return out(res,{success:false,error:e.message});}}
-  if(p==="/order"&&req.method==="POST"){let b="";req.on("data",c=>b+=c);req.on("end",async()=>{try{const{symbol,side,quantity,type,price}=JSON.parse(b);const pid=symbol.replace("USDT","-USDT");const oc=type==="LIMIT"?{limit_limit_gtc:{base_size:String(quantity),limit_price:String(price),post_only:false}}:{market_market_ioc:{base_size:String(quantity)}};const r=await cb("POST","/api/v3/brokerage/orders",{client_order_id:`qf-${Date.now()}`,product_id:pid,side:side==="BUY"?"BUY":"SELL",order_configuration:oc});if(r.success)return out(res,{success:true,orderId:r.order_id,status:"FILLED",executedQty:String(quantity)});return out(res,{success:false,error:r.error_response?.message||r.error||JSON.stringify(r)});}catch(e){return out(res,{success:false,error:e.message});}});return;}
-  if(p==="/trades"){try{const s=u.searchParams.get("symbol")||"SOLUSDT";const d=await cb("GET",`/api/v3/brokerage/orders/historical/fills?product_id=${s.replace("USDT","-USDT")}&limit=20`);return out(res,{success:true,trades:(d.fills||[]).map(f=>({id:f.trade_id,time:new Date(f.trade_time).getTime(),side:f.side,price:+f.price,qty:+f.size,total:+f.price*+f.size}))});}catch(e){return out(res,{success:false,error:e.message});}}
-  out(res,{error:"Not found"},404);
-}).listen(PORT,()=>console.log("Quantifesta API running"));
+
+  // Klines (Binance public)
+  if (p === "/klines") {
+    const sym = u.searchParams.get("symbol") || "SOLUSDT";
+    const candles = await binanceKlines(sym, u.searchParams.get("interval") || "1h", +(u.searchParams.get("limit") || 60));
+    return out(res, { success: true, candles });
+  }
+
+  // Wallet balance via Helius
+  if (p === "/account") {
+    const wallet = u.searchParams.get("wallet");
+    if (!wallet) return out(res, { success: false, error: "Pass ?wallet=YOUR_PHANTOM_ADDRESS" });
+    try {
+      // SOL balance
+      const solRes = await rpc("getBalance", [wallet]);
+      const solBal = (solRes.result?.value || 0) / 1e9;
+      // Token accounts
+      const tokRes = await rpc("getTokenAccountsByOwner", [
+        wallet,
+        { programId: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" },
+        { encoding: "jsonParsed" }
+      ]);
+      const tokens = (tokRes.result?.value || []).map(t => {
+        const info = t.account.data.parsed.info;
+        return { asset: info.mint, free: +info.tokenAmount.uiAmount, locked: 0, total: +info.tokenAmount.uiAmount };
+      }).filter(t => t.total > 0);
+      const balances = [{ asset: "SOL", free: solBal, locked: 0, total: solBal }, ...tokens];
+      return out(res, { success: true, balances, exchange: "solana" });
+    } catch (e) { return out(res, { success: false, error: e.message }); }
+  }
+
+  // Jupiter quote
+  if (p === "/quote") {
+    const inputMint = u.searchParams.get("inputMint") || TOKENS.USDC;
+    const outputMint = u.searchParams.get("outputMint") || TOKENS.SOL;
+    const amount = u.searchParams.get("amount") || "1000000";
+    try {
+      const quote = await get(`https://quote-api.jup.ag/v6/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=50`);
+      return out(res, { success: true, quote });
+    } catch (e) { return out(res, { success: false, error: e.message }); }
+  }
+
+  // Jupiter swap transaction (returns transaction for wallet to sign)
+  if (p === "/swap" && req.method === "POST") {
+    let body = ""; req.on("data", c => body += c);
+    req.on("end", async () => {
+      try {
+        const { inputMint, outputMint, amount, userPublicKey, slippageBps = 50 } = JSON.parse(body);
+        // Get quote first
+        const quote = await get(`https://quote-api.jup.ag/v6/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=${slippageBps}`);
+        if (quote.error) return out(res, { success: false, error: quote.error });
+        // Get swap transaction
+        const swapRes = await post("https://quote-api.jup.ag/v6/swap", {
+          quoteResponse: quote,
+          userPublicKey,
+          wrapAndUnwrapSol: true,
+          dynamicComputeUnitLimit: true,
+          prioritizationFeeLamports: "auto"
+        });
+        if (swapRes.swapTransaction) {
+          return out(res, { success: true, swapTransaction: swapRes.swapTransaction, quote });
+        }
+        return out(res, { success: false, error: swapRes.error || JSON.stringify(swapRes) });
+      } catch (e) { return out(res, { success: false, error: e.message }); }
+    });
+    return;
+  }
+
+  // Order endpoint (maps to Jupiter swap)
+  if (p === "/order" && req.method === "POST") {
+    let body = ""; req.on("data", c => body += c);
+    req.on("end", async () => {
+      try {
+        const { symbol, side, quantity, userPublicKey } = JSON.parse(body);
+        const sym = symbol.replace("USDT", "");
+        const inputMint = side === "BUY" ? TOKENS.USDC : (TOKENS[sym] || TOKENS.SOL);
+        const outputMint = side === "BUY" ? (TOKENS[sym] || TOKENS.SOL) : TOKENS.USDC;
+        const decimals = side === "BUY" ? 6 : 9;
+        const amount = Math.floor(quantity * Math.pow(10, decimals));
+        const quote = await get(`https://quote-api.jup.ag/v6/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=50`);
+        if (quote.error) return out(res, { success: false, error: quote.error });
+        if (!userPublicKey) return out(res, { success: false, error: "Pass userPublicKey — connect Phantom wallet first" });
+        const swapRes = await post("https://quote-api.jup.ag/v6/swap", {
+          quoteResponse: quote, userPublicKey, wrapAndUnwrapSol: true,
+          dynamicComputeUnitLimit: true, prioritizationFeeLamports: "auto"
+        });
+        if (swapRes.swapTransaction) {
+          return out(res, { success: true, swapTransaction: swapRes.swapTransaction, message: "Sign this transaction in Phantom to complete the swap", quote });
+        }
+        return out(res, { success: false, error: swapRes.error || JSON.stringify(swapRes) });
+      } catch (e) { return out(res, { success: false, error: e.message }); }
+    });
+    return;
+  }
+
+  // Trades (recent Helius transactions)
+  if (p === "/trades") {
+    const wallet = u.searchParams.get("wallet");
+    if (!wallet) return out(res, { success: true, trades: [] });
+    try {
+      const txRes = await get(`https://api.helius.xyz/v0/addresses/${wallet}/transactions?api-key=5887995d-86e5-4f50-8558-c53a988d4ec2&limit=20&type=SWAP`);
+      const trades = Array.isArray(txRes) ? txRes.map(tx => ({
+        id: tx.signature,
+        time: tx.timestamp * 1000,
+        side: "SWAP",
+        price: 0,
+        qty: 0,
+        total: 0,
+        description: tx.description || ""
+      })) : [];
+      return out(res, { success: true, trades });
+    } catch (e) { return out(res, { success: false, error: e.message }); }
+  }
+
+  out(res, { error: "Not found" }, 404);
+}).listen(PORT, () => console.log(`Quantifesta API (Jupiter+Helius) on port ${PORT}`));
+        
