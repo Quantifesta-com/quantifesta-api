@@ -88,8 +88,8 @@ http.createServer(async (req, res) => {
   const u = new URL(req.url, "http://x"), p = u.pathname;
 
   // Health
-  if (p === "/health") return out(res, { ok: true, exchange: "jupiter+helius", ts: new Date().toISOString() });
-
+  if (p === "/health") return out(res, { ok: true, exchange: "jupiter+helius", ts: new Date().toISOString() }):
+  if (p === "/debug-bot") return out(res, { keySet: !!BOT_PRIVATE_KEY, keyLength: BOT_PRIVATE_KEY.length, keyStart: BOT_PRIVATE_KEY.slice(0,8), keypairLoaded: !!botKeypair, wallet: botKeypair?.publicKey.toString() });
   // Prices (Binance public)
   if (p === "/prices") {
     try {
