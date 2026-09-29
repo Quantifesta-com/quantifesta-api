@@ -1,13 +1,14 @@
 {
   "name": "quantifesta-api",
-  "version": "1.0.0",
-  "description": "Quantifesta secure Coinbase trading API",
+  "version": "2.0.0",
+  "description": "Quantifesta Auto-Trading Bot",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "jsonwebtoken": "^9.0.2"
+    "@solana/web3.js": "^1.95.3",
+    "bs58": "^4.0.1"
   },
   "engines": {
     "node": ">=18.0.0"
