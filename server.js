@@ -4,8 +4,37 @@ const https = require("https");
 const PORT = process.env.PORT || 3000;
 const HELIUS_RPC = process.env.HELIUS_RPC || "https://mainnet.helius-rpc.com/?api-key=5887995d-86e5-4f50-8558-c53a988d4ec2";
 const JUP_API_KEY = process.env.JUP_API_KEY || "jup_4e01628c96dcadffcf9d5ab360837152bdfc984674151b077d280b7107d9f315";
+const BOT_PRIVATE_KEY = process.env.BOT_PRIVATE_KEY || "";
 
-// ── HTTP helpers ─────────────────────────────────────────────
+const { Connection, Keypair, VersionedTransaction } = require("@solana/web3.js");
+const bs58 = require("bs58");
+const bs58decode = typeof bs58.decode === "function" ? bs58.decode : bs58.default.decode;
+
+let botKeypair = null;
+try {
+  const decoded = bs58decode(BOT_PRIVATE_KEY);
+  botKeypair = Keypair.fromSecretKey(decoded);
+  console.log("✅ Bot wallet:", botKeypair.publicKey.toString());
+} catch(e) { console.log("❌ Bot keypair error:", e.message); }
+
+const connection = new Connection(HELIUS_RPC, "confirmed");
+
+const TOKENS = {
+  SOL:  "So11111111111111111111111111111111111111112",
+  USDC: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+  USDT: "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+  BONK: "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+  JUP:  "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",
+  WIF:  "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm",
+};
+
+let autoTrading = false;
+let autoConfig = { inputMint: TOKENS.USDC, outputMint: TOKENS.SOL, amount: 1000000, slippageBps: 50, intervalSecs: 60 };
+let tradeLog = [];
+let autoInterval = null;
+let tradeCount = 0;
+const priceHistory = { SOL: [], ETH: [], BTC: [] };
+
 function get(url) {
   return new Promise((resolve, reject) => {
     https.get(url, { headers: { "x-api-key": JUP_API_KEY } }, (res) => {
@@ -15,15 +44,14 @@ function get(url) {
   });
 }
 
-function post(url, body, headers = {}) {
+function postJson(url, body) {
   return new Promise((resolve, reject) => {
     const data = JSON.stringify(body);
     const u = new URL(url);
-    const opts = {
+    const req = https.request({
       hostname: u.hostname, path: u.pathname + u.search, method: "POST",
-      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(data), "x-api-key": JUP_API_KEY, ...headers }
-    };
-    const req = https.request(opts, (res) => {
+      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(data), "x-api-key": JUP_API_KEY }
+    }, (res) => {
       let d = ""; res.on("data", c => d += c);
       res.on("end", () => { try { resolve(JSON.parse(d)); } catch { resolve({ error: d }); } });
     });
@@ -33,10 +61,9 @@ function post(url, body, headers = {}) {
 }
 
 function rpc(method, params = []) {
-  return post(HELIUS_RPC, { jsonrpc: "2.0", id: 1, method, params });
+  return postJson(HELIUS_RPC, { jsonrpc: "2.0", id: 1, method, params });
 }
 
-// ── Binance public prices ────────────────────────────────────
 function binancePrice(symbol) {
   return new Promise((resolve) => {
     https.get(`https://api.binance.com/api/v3/ticker/24hr?symbol=${symbol}`, (res) => {
@@ -63,109 +90,172 @@ function binanceKlines(symbol, interval = "1h", limit = 60) {
   });
 }
 
-// ── Token mints ──────────────────────────────────────────────
-const TOKENS = {
-  SOL:  "So11111111111111111111111111111111111111112",
-  USDC: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-  USDT: "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
-  ETH:  "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs",
-  BTC:  "9n4nbM75f5Ui33ZbPYXn59EwSgE8CGsHtAeTH5YFeJ9E",
-};
-
-function cors(r) {
-  r.setHeader("Access-Control-Allow-Origin", "*");
-  r.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  r.setHeader("Access-Control-Allow-Headers", "Content-Type");
-}
-function out(r, d, s = 200) {
-  cors(r); r.writeHead(s, { "Content-Type": "application/json" });
-  r.end(JSON.stringify(d));
+function rsiCalc(prices, period = 14) {
+  if (prices.length < period + 1) return 50;
+  let g = 0, l = 0;
+  for (let i = 1; i <= period; i++) { const d = prices[i] - prices[i-1]; if (d > 0) g += d; else l -= d; }
+  g /= period; l /= period;
+  return l === 0 ? 100 : 100 - 100 / (1 + g / l);
 }
 
-// ── Server ───────────────────────────────────────────────────
+function maCalc(prices, period) {
+  if (prices.length < period) return prices[prices.length - 1] || 0;
+  return prices.slice(-period).reduce((a, b) => a + b, 0) / period;
+}
+
+function getSignal(sym) {
+  const ph = priceHistory[sym] || [];
+  if (ph.length < 5) return { signal: "NEUTRAL", confidence: 40, score: 0 };
+  const r = rsiCalc(ph);
+  const ma7 = maCalc(ph, Math.min(7, ph.length));
+  const ma20 = maCalc(ph, Math.min(20, ph.length));
+  let score = 0;
+  if (r < 30) score += 30; else if (r < 40) score += 15;
+  else if (r > 70) score -= 30; else if (r > 60) score -= 15;
+  if (ma7 > ma20) score += 10; else score -= 10;
+  if (ph.length >= 6) {
+    const recent = ph.slice(-3).reduce((a, b) => a + b, 0) / 3;
+    const older = ph.slice(-6, -3).reduce((a, b) => a + b, 0) / 3;
+    if (recent > older * 1.005) score += 10; else if (recent < older * 0.995) score -= 10;
+  }
+  let signal = "NEUTRAL", confidence = 40;
+  if (score >= 30) { signal = "STRONG BUY"; confidence = Math.min(95, 65 + score); }
+  else if (score >= 15) { signal = "BUY"; confidence = Math.min(80, 55 + score); }
+  else if (score <= -30) { signal = "STRONG SELL"; confidence = Math.min(95, 65 + Math.abs(score)); }
+  else if (score <= -15) { signal = "SELL"; confidence = Math.min(80, 55 + Math.abs(score)); }
+  return { signal, confidence, score, rsi: r, ma7, ma20 };
+}
+
+async function executeSwap(inputMint, outputMint, amount, slippageBps = 50) {
+  if (!botKeypair) throw new Error("No bot keypair loaded");
+  const quote = await get(`https://quote-api.jup.ag/v6/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=${slippageBps}`);
+  if (!quote || quote.error) throw new Error("Quote failed: " + (quote?.error || "unknown"));
+  const swapRes = await postJson("https://quote-api.jup.ag/v6/swap", {
+    quoteResponse: quote, userPublicKey: botKeypair.publicKey.toString(),
+    wrapAndUnwrapSol: true, dynamicComputeUnitLimit: true, prioritizationFeeLamports: "auto"
+  });
+  if (!swapRes.swapTransaction) throw new Error("No swap tx: " + JSON.stringify(swapRes));
+  const tx = VersionedTransaction.deserialize(Buffer.from(swapRes.swapTransaction, "base64"));
+  tx.sign([botKeypair]);
+  const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false, maxRetries: 3 });
+  await connection.confirmTransaction(sig, "confirmed");
+  return { signature: sig, quote, inputAmount: amount, outputAmount: quote.outAmount };
+}
+
+async function runAutoTrade() {
+  try {
+    const [SOL, ETH, BTC] = await Promise.all([binancePrice("SOLUSDT"), binancePrice("ETHUSDT"), binancePrice("BTCUSDT")]);
+    if (SOL) { priceHistory.SOL.push(SOL.usd); if (priceHistory.SOL.length > 100) priceHistory.SOL.shift(); }
+    if (ETH) { priceHistory.ETH.push(ETH.usd); if (priceHistory.ETH.length > 100) priceHistory.ETH.shift(); }
+    if (BTC) { priceHistory.BTC.push(BTC.usd); if (priceHistory.BTC.length > 100) priceHistory.BTC.shift(); }
+    const sig = getSignal("SOL");
+    const entry = { time: new Date().toISOString(), signal: sig.signal, confidence: sig.confidence, rsi: Math.round(sig.rsi), action: "WATCHING" };
+    if (sig.signal === "STRONG BUY" && sig.confidence >= 75) {
+      entry.action = "BUYING";
+      try {
+        const result = await executeSwap(autoConfig.inputMint, autoConfig.outputMint, autoConfig.amount, autoConfig.slippageBps);
+        entry.action = "BOUGHT"; entry.signature = result.signature; entry.type = "BUY"; tradeCount++;
+      } catch(e) { entry.action = "BUY_FAILED"; entry.error = e.message; }
+    } else if (sig.signal === "STRONG SELL" && sig.confidence >= 75) {
+      entry.action = "SELLING";
+      try {
+        const solBal = await rpc("getBalance", [botKeypair.publicKey.toString()]);
+        const solAmount = Math.floor((solBal.result?.value || 0) * 0.9);
+        if (solAmount > 0) {
+          const result = await executeSwap(TOKENS.SOL, TOKENS.USDC, solAmount, autoConfig.slippageBps);
+          entry.action = "SOLD"; entry.signature = result.signature; entry.type = "SELL"; tradeCount++;
+        } else entry.action = "NO_SOL";
+      } catch(e) { entry.action = "SELL_FAILED"; entry.error = e.message; }
+    }
+    tradeLog.unshift(entry);
+    tradeLog = tradeLog.slice(0, 100);
+    console.log(`[AUTO] ${entry.signal} ${entry.confidence}% → ${entry.action}`);
+  } catch(e) { console.log("[AUTO ERROR]", e.message); }
+}
+
+function cors(r) { r.setHeader("Access-Control-Allow-Origin","*"); r.setHeader("Access-Control-Allow-Methods","GET,POST,OPTIONS"); r.setHeader("Access-Control-Allow-Headers","Content-Type"); }
+function out(r, d, s = 200) { cors(r); r.writeHead(s, {"Content-Type":"application/json"}); r.end(JSON.stringify(d)); }
+
 http.createServer(async (req, res) => {
   if (req.method === "OPTIONS") { cors(res); res.writeHead(204); res.end(); return; }
   const u = new URL(req.url, "http://x"), p = u.pathname;
 
-  // Health
-  if (p === "/health") return out(res, { ok: true, exchange: "jupiter+helius", ts: new Date().toISOString() }):
-  if (p === "/debug-bot") return out(res, { keySet: !!BOT_PRIVATE_KEY, keyLength: BOT_PRIVATE_KEY.length, keyStart: BOT_PRIVATE_KEY.slice(0,8), keypairLoaded: !!botKeypair, wallet: botKeypair?.publicKey.toString() });
-  // Prices (Binance public)
+  if (p === "/health") return out(res, { ok: true, exchange: "jupiter+helius", botWallet: botKeypair?.publicKey.toString() || "NOT LOADED", autoTrading, tradeCount, ts: new Date().toISOString() });
+
   if (p === "/prices") {
     try {
       const [SOL, ETH, BTC] = await Promise.all([binancePrice("SOLUSDT"), binancePrice("ETHUSDT"), binancePrice("BTCUSDT")]);
+      if (SOL) priceHistory.SOL.push(SOL.usd);
+      if (ETH) priceHistory.ETH.push(ETH.usd);
+      if (BTC) priceHistory.BTC.push(BTC.usd);
       return out(res, { success: true, prices: { SOL, ETH, BTC } });
-    } catch (e) { return out(res, { success: false, error: e.message }); }
+    } catch(e) { return out(res, { success: false, error: e.message }); }
   }
 
-  // Klines (Binance public)
   if (p === "/klines") {
     const sym = u.searchParams.get("symbol") || "SOLUSDT";
-    const candles = await binanceKlines(sym, u.searchParams.get("interval") || "1h", +(u.searchParams.get("limit") || 60));
-    return out(res, { success: true, candles });
+    return out(res, { success: true, candles: await binanceKlines(sym, u.searchParams.get("interval") || "1h", +(u.searchParams.get("limit") || 60)) });
   }
 
-  // Wallet balance via Helius
+  if (p === "/signal") {
+    const sym = u.searchParams.get("symbol") || "SOL";
+    return out(res, { success: true, ...getSignal(sym) });
+  }
+
   if (p === "/account") {
-    const wallet = u.searchParams.get("wallet");
-    if (!wallet) return out(res, { success: false, error: "Pass ?wallet=YOUR_PHANTOM_ADDRESS" });
+    const wallet = u.searchParams.get("wallet") || botKeypair?.publicKey.toString();
+    if (!wallet) return out(res, { success: false, error: "No wallet" });
     try {
-      // SOL balance
       const solRes = await rpc("getBalance", [wallet]);
       const solBal = (solRes.result?.value || 0) / 1e9;
-      // Token accounts
-      const tokRes = await rpc("getTokenAccountsByOwner", [
-        wallet,
-        { programId: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" },
-        { encoding: "jsonParsed" }
-      ]);
-      const tokens = (tokRes.result?.value || []).map(t => {
-        const info = t.account.data.parsed.info;
-        return { asset: info.mint, free: +info.tokenAmount.uiAmount, locked: 0, total: +info.tokenAmount.uiAmount };
-      }).filter(t => t.total > 0);
-      const balances = [{ asset: "SOL", free: solBal, locked: 0, total: solBal }, ...tokens];
-      return out(res, { success: true, balances, exchange: "solana" });
-    } catch (e) { return out(res, { success: false, error: e.message }); }
+      return out(res, { success: true, balances: [{ asset: "SOL", free: solBal, locked: 0, total: solBal }], wallet, exchange: "solana" });
+    } catch(e) { return out(res, { success: false, error: e.message }); }
   }
 
-  // Jupiter quote
-  if (p === "/quote") {
-    const inputMint = u.searchParams.get("inputMint") || TOKENS.USDC;
-    const outputMint = u.searchParams.get("outputMint") || TOKENS.SOL;
-    const amount = u.searchParams.get("amount") || "1000000";
-    try {
-      const quote = await get(`https://quote-api.jup.ag/v6/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=50`);
-      return out(res, { success: true, quote });
-    } catch (e) { return out(res, { success: false, error: e.message }); }
-  }
-
-  // Jupiter swap transaction (returns transaction for wallet to sign)
-  if (p === "/swap" && req.method === "POST") {
+  if (p === "/auto/start" && req.method === "POST") {
     let body = ""; req.on("data", c => body += c);
-    req.on("end", async () => {
+    req.on("end", () => {
       try {
-        const { inputMint, outputMint, amount, userPublicKey, slippageBps = 50 } = JSON.parse(body);
-        // Get quote first
-        const quote = await get(`https://quote-api.jup.ag/v6/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=${slippageBps}`);
-        if (quote.error) return out(res, { success: false, error: quote.error });
-        // Get swap transaction
-        const swapRes = await post("https://quote-api.jup.ag/v6/swap", {
-          quoteResponse: quote,
-          userPublicKey,
-          wrapAndUnwrapSol: true,
-          dynamicComputeUnitLimit: true,
-          prioritizationFeeLamports: "auto"
-        });
-        if (swapRes.swapTransaction) {
-          return out(res, { success: true, swapTransaction: swapRes.swapTransaction, quote });
-        }
-        return out(res, { success: false, error: swapRes.error || JSON.stringify(swapRes) });
-      } catch (e) { return out(res, { success: false, error: e.message }); }
+        const cfg = JSON.parse(body || "{}");
+        if (cfg.amount) autoConfig.amount = cfg.amount;
+        if (cfg.slippageBps) autoConfig.slippageBps = cfg.slippageBps;
+        if (cfg.intervalSecs) autoConfig.intervalSecs = cfg.intervalSecs;
+        if (cfg.inputMint) autoConfig.inputMint = cfg.inputMint;
+        if (cfg.outputMint) autoConfig.outputMint = cfg.outputMint;
+        if (autoInterval) clearInterval(autoInterval);
+        autoTrading = true;
+        runAutoTrade();
+        autoInterval = setInterval(runAutoTrade, autoConfig.intervalSecs * 1000);
+        out(res, { success: true, message: "Auto trading started 🤖", config: autoConfig, botWallet: botKeypair?.publicKey.toString() });
+      } catch(e) { out(res, { success: false, error: e.message }); }
     });
     return;
   }
 
-  // Order endpoint (maps to Jupiter swap)
+  if (p === "/auto/stop") {
+    if (autoInterval) clearInterval(autoInterval);
+    autoTrading = false; autoInterval = null;
+    return out(res, { success: true, message: "Auto trading stopped", tradeCount });
+  }
+
+  if (p === "/auto/status") {
+    return out(res, { success: true, autoTrading, config: autoConfig, tradeCount, log: tradeLog.slice(0, 20), signals: { SOL: getSignal("SOL"), ETH: getSignal("ETH"), BTC: getSignal("BTC") }, botWallet: botKeypair?.publicKey.toString() });
+  }
+
+  if (p === "/auto/log") return out(res, { success: true, log: tradeLog });
+
+  if (p === "/swap" && req.method === "POST") {
+    let body = ""; req.on("data", c => body += c);
+    req.on("end", async () => {
+      try {
+        const { inputMint, outputMint, amount, slippageBps = 50 } = JSON.parse(body);
+        const result = await executeSwap(inputMint, outputMint, amount, slippageBps);
+        out(res, { success: true, ...result });
+      } catch(e) { out(res, { success: false, error: e.message }); }
+    });
+    return;
+  }
+
   if (p === "/order" && req.method === "POST") {
     let body = ""; req.on("data", c => body += c);
     req.on("end", async () => {
@@ -174,43 +264,20 @@ http.createServer(async (req, res) => {
         const sym = symbol.replace("USDT", "");
         const inputMint = side === "BUY" ? TOKENS.USDC : (TOKENS[sym] || TOKENS.SOL);
         const outputMint = side === "BUY" ? (TOKENS[sym] || TOKENS.SOL) : TOKENS.USDC;
-        const decimals = side === "BUY" ? 6 : 9;
-        const amount = Math.floor(quantity * Math.pow(10, decimals));
-        const quote = await get(`https://quote-api.jup.ag/v6/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=50`);
-        if (quote.error) return out(res, { success: false, error: quote.error });
-        if (!userPublicKey) return out(res, { success: false, error: "Pass userPublicKey — connect Phantom wallet first" });
-        const swapRes = await post("https://quote-api.jup.ag/v6/swap", {
-          quoteResponse: quote, userPublicKey, wrapAndUnwrapSol: true,
-          dynamicComputeUnitLimit: true, prioritizationFeeLamports: "auto"
-        });
-        if (swapRes.swapTransaction) {
-          return out(res, { success: true, swapTransaction: swapRes.swapTransaction, message: "Sign this transaction in Phantom to complete the swap", quote });
+        const amount = Math.floor(quantity * (side === "BUY" ? 1e6 : 1e9));
+        if (userPublicKey) {
+          const quote = await get(`https://quote-api.jup.ag/v6/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=50`);
+          const swapRes = await postJson("https://quote-api.jup.ag/v6/swap", { quoteResponse: quote, userPublicKey, wrapAndUnwrapSol: true, dynamicComputeUnitLimit: true, prioritizationFeeLamports: "auto" });
+          return out(res, { success: true, swapTransaction: swapRes.swapTransaction, quote, mode: "frontend-sign" });
         }
-        return out(res, { success: false, error: swapRes.error || JSON.stringify(swapRes) });
-      } catch (e) { return out(res, { success: false, error: e.message }); }
+        const result = await executeSwap(inputMint, outputMint, amount);
+        out(res, { success: true, ...result, mode: "bot-sign" });
+      } catch(e) { out(res, { success: false, error: e.message }); }
     });
     return;
   }
 
-  // Trades (recent Helius transactions)
-  if (p === "/trades") {
-    const wallet = u.searchParams.get("wallet");
-    if (!wallet) return out(res, { success: true, trades: [] });
-    try {
-      const txRes = await get(`https://api.helius.xyz/v0/addresses/${wallet}/transactions?api-key=5887995d-86e5-4f50-8558-c53a988d4ec2&limit=20&type=SWAP`);
-      const trades = Array.isArray(txRes) ? txRes.map(tx => ({
-        id: tx.signature,
-        time: tx.timestamp * 1000,
-        side: "SWAP",
-        price: 0,
-        qty: 0,
-        total: 0,
-        description: tx.description || ""
-      })) : [];
-      return out(res, { success: true, trades });
-    } catch (e) { return out(res, { success: false, error: e.message }); }
-  }
+  if (p === "/trades") return out(res, { success: true, trades: tradeLog.filter(t => t.type) });
 
   out(res, { error: "Not found" }, 404);
-}).listen(PORT, () => console.log(`Quantifesta API (Jupiter+Helius) on port ${PORT}`));
-        
+}).listen(PORT, () => console.log(`Quantifesta Auto-Trading Bot running on port ${PORT}`));
