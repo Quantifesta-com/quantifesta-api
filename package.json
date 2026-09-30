@@ -3,5 +3,8 @@
   "version": "2.0.0",
   "main": "server.js",
   "scripts": { "start": "node server.js" },
+  "dependencies": {
+    "@solana/web3.js": "1.87.6"
+  },
   "engines": { "node": ">=18.0.0" }
 }
