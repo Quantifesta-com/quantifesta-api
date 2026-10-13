@@ -20,56 +20,100 @@ function signEd25519(message,privateKey){
   return crypto.sign(null,message,keyObj);
 }
 
-const TOKENS={SOL:"So11111111111111111111111111111111111111112",USDC:"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",USDT:"Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",BONK:"DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",JUP:"JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",WIF:"EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm"};
+const TOKENS={
+  SOL:"So11111111111111111111111111111111111111112",
+  USDC:"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+  USDT:"Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+  BONK:"DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+  JUP:"JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",
+  WIF:"EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm",
+  PYTH:"HZ1JovNiVvSZEbEbp3p5LUkbgKRGV1Q3bAcfhFkH7uvA",
+  RAY:"4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R",
+  ORCA:"orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE",
+};
 
-let autoTrading=false,autoInterval=null,tradeLog=[],tradeCount=0,totalPnl=0,lastBuyPrice=0;
-let autoConfig={amount:1000000,slippageBps:50,intervalSecs:60,takeProfitPct:3,stopLossPct:2,minConfidence:75};
-const priceHistory={SOL:[],ETH:[],BTC:[]};
+const CG_IDS={SOL:"solana",ETH:"ethereum",BTC:"bitcoin",BONK:"bonk",WIF:"dogwifcoin",JUP:"jupiter-exchange-solana",PYTH:"pyth-network",RAY:"raydium",ORCA:"orca"};
 
-function get(url,headers={}){return new Promise((res,rej)=>{https.get(url,{headers:{"User-Agent":"Mozilla/5.0","x-api-key":JUP_API_KEY,...headers}},(r)=>{let d="";r.on("data",c=>d+=c);r.on("end",()=>{try{res(JSON.parse(d));}catch{res({error:d});}});}).on("error",rej);});}
-function postJson(url,body,extraHeaders={}){return new Promise((res,rej)=>{const d=JSON.stringify(body),u=new URL(url);const r=https.request({hostname:u.hostname,path:u.pathname+u.search,method:"POST",headers:{"Content-Type":"application/json","Content-Length":Buffer.byteLength(d),"User-Agent":"Mozilla/5.0","x-api-key":JUP_API_KEY,...extraHeaders}},(rs)=>{let x="";rs.on("data",c=>x+=c);rs.on("end",()=>{try{res(JSON.parse(x));}catch{res({error:x});}});});r.on("error",rej);r.write(d);r.end();});}
-function rpc(method,params=[]){return postJson(HELIUS_RPC,{jsonrpc:"2.0",id:1,method,params},{});}
+// Jupiter API endpoints — try multiple in order
+const JUP_QUOTE_HOSTS=["quote-api.jup.ag","jupiter-swap-api.quiknode.pro","jup.ag"];
 
-// ── Multi-source price fetcher ───────────────────────────────
-function fetchPrice(sym){
-  const ticker=sym.replace("USDT","").toLowerCase();
-  const cgId=ticker==="sol"?"solana":ticker==="eth"?"ethereum":ticker==="btc"?"bitcoin":ticker;
-  return new Promise(r=>{
-    // Source 1: Coinbase public
-    const req=https.request({hostname:"api.coinbase.com",path:`/v2/prices/${ticker.toUpperCase()}-USD/spot`,method:"GET",headers:{"User-Agent":"Mozilla/5.0","CB-VERSION":"2016-02-18"}},(res)=>{
+let autoTrading=false,autoInterval=null,tradeLog=[],tradeCount=0,totalPnl=0,lastBuyPrice=0,lastBuyToken="SOL";
+let autoConfig={amount:1000000,slippageBps:100,intervalSecs:60,takeProfitPct:3,stopLossPct:2,minConfidence:75};
+const priceHistory={SOL:[],ETH:[],BTC:[],BONK:[],WIF:[],JUP:[],PYTH:[],RAY:[],ORCA:[]};
+
+function httpsGet(hostname,path,headers={}){
+  return new Promise((resolve,reject)=>{
+    const req=https.request({hostname,path,method:"GET",headers:{"User-Agent":"Mozilla/5.0","x-api-key":JUP_API_KEY,...headers}},(res)=>{
       let d="";res.on("data",c=>d+=c);
-      res.on("end",()=>{
-        try{const x=JSON.parse(d);if(x.data?.amount){r({usd:+x.data.amount,change24h:0,high24h:+x.data.amount,low24h:+x.data.amount,volume24h:0});return;}}catch{}
-        // Source 2: CoinGecko
-        https.get(`https://api.coingecko.com/api/v3/simple/price?ids=${cgId}&vs_currencies=usd&include_24hr_change=true&include_24hr_vol=true`,{headers:{"User-Agent":"Mozilla/5.0"}},(res2)=>{
-          let d2="";res2.on("data",c=>d2+=c);
-          res2.on("end",()=>{
-            try{const x2=JSON.parse(d2);const coin=x2[cgId];if(coin?.usd){r({usd:+coin.usd,change24h:+(coin.usd_24h_change||0),high24h:+coin.usd,low24h:+coin.usd,volume24h:+(coin.usd_24h_vol||0)});return;}}catch{}
-            // Source 3: Kraken
-            https.get(`https://api.kraken.com/0/public/Ticker?pair=${ticker.toUpperCase()}USD`,{headers:{"User-Agent":"Mozilla/5.0"}},(res3)=>{
-              let d3="";res3.on("data",c=>d3+=c);
-              res3.on("end",()=>{
-                try{const x3=JSON.parse(d3);const keys=Object.keys(x3.result||{});if(keys.length){const t=x3.result[keys[0]];r({usd:+t.c[0],change24h:0,high24h:+t.h[1],low24h:+t.l[1],volume24h:+t.v[1]});return;}}catch{}
-                r(null);
-              });
-            }).on("error",()=>r(null));
-          });
-        }).on("error",()=>r(null));
-      });
+      res.on("end",()=>{try{resolve(JSON.parse(d));}catch{resolve({error:d});}});
     });
-    req.on("error",()=>{
-      // Fallback direct to CoinGecko
-      https.get(`https://api.coingecko.com/api/v3/simple/price?ids=${cgId}&vs_currencies=usd&include_24hr_change=true`,{headers:{"User-Agent":"Mozilla/5.0"}},(res2)=>{
-        let d2="";res2.on("data",c=>d2+=c);
-        res2.on("end",()=>{try{const x2=JSON.parse(d2);const coin=x2[cgId];if(coin?.usd){r({usd:+coin.usd,change24h:+(coin.usd_24h_change||0),high24h:+coin.usd,low24h:+coin.usd,volume24h:0});return;}}catch{}r(null);});
-      }).on("error",()=>r(null));
-    });
-    req.end();
+    req.on("error",reject);req.end();
   });
 }
 
-function binanceKlines(sym,iv="1h",lim=60){return new Promise(r=>{https.get(`https://api.binance.com/api/v3/klines?symbol=${sym}&interval=${iv}&limit=${lim}`,{headers:{"User-Agent":"Mozilla/5.0"}},rs=>{let d="";rs.on("data",c=>d+=c);rs.on("end",()=>{try{r(JSON.parse(d).map(k=>({t:k[0],o:+k[1],h:+k[2],l:+k[3],c:+k[4],v:+k[5]})));}catch{r([]);}});}).on("error",()=>r([]));});}
+function httpsPost(hostname,path,body,headers={}){
+  return new Promise((resolve,reject)=>{
+    const d=JSON.stringify(body);
+    const req=https.request({hostname,path,method:"POST",headers:{"Content-Type":"application/json","Content-Length":Buffer.byteLength(d),"User-Agent":"Mozilla/5.0","x-api-key":JUP_API_KEY,...headers}},(res)=>{
+      let x="";res.on("data",c=>x+=c);
+      res.on("end",()=>{try{resolve(JSON.parse(x));}catch{resolve({error:x});}});
+    });
+    req.on("error",reject);req.write(d);req.end();
+  });
+}
 
+function rpc(method,params=[]){
+  const u=new URL(HELIUS_RPC);
+  return httpsPost(u.hostname,u.pathname+u.search,{jsonrpc:"2.0",id:1,method,params});
+}
+
+// ── Try Jupiter quote from multiple hosts ────────────────────
+async function jupQuote(inputMint,outputMint,amount,slippageBps){
+  const path=`/v6/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=${slippageBps}`;
+  for(const host of JUP_QUOTE_HOSTS){
+    try{
+      const q=await httpsGet(host,path);
+      if(q&&!q.error&&q.inAmount)return{quote:q,host};
+    }catch(e){console.log(`[JUP] ${host} failed: ${e.message}`);}
+  }
+  throw new Error("All Jupiter quote hosts failed");
+}
+
+async function jupSwap(host,quoteResponse,userPublicKey){
+  return httpsPost(host,"/v6/swap",{quoteResponse,userPublicKey,wrapAndUnwrapSol:true,dynamicComputeUnitLimit:true,prioritizationFeeLamports:"auto"});
+}
+
+// ── Prices ───────────────────────────────────────────────────
+function fetchAllPricesCG(ids){
+  return new Promise(r=>{
+    httpsGet("api.coingecko.com",`/api/v3/simple/price?ids=${ids.join(",")}&vs_currencies=usd&include_24hr_change=true&include_24hr_vol=true`)
+      .then(d=>r(d||{})).catch(()=>r({}));
+  });
+}
+
+function fetchCoinbasePriceReq(ticker){
+  return new Promise(r=>{
+    httpsGet("api.coinbase.com",`/v2/prices/${ticker.toUpperCase()}-USD/spot`,{"CB-VERSION":"2016-02-18"})
+      .then(d=>{if(d?.data?.amount)r(+d.data.amount);else r(null);}).catch(()=>r(null));
+  });
+}
+
+async function fetchAllPrices(){
+  const allIds=Object.values(CG_IDS);
+  const cgData=await fetchAllPricesCG(allIds);
+  const prices={};
+  for(const[sym,cgId] of Object.entries(CG_IDS)){
+    const d=cgData[cgId];
+    if(d?.usd){prices[sym]={usd:+d.usd,change24h:+(d.usd_24h_change||0),high24h:+d.usd,low24h:+d.usd,volume24h:+(d.usd_24h_vol||0)};}
+    else if(["SOL","ETH","BTC"].includes(sym)){
+      const p=await fetchCoinbasePriceReq(sym);
+      if(p)prices[sym]={usd:p,change24h:0,high24h:p,low24h:p,volume24h:0};
+    }
+  }
+  return prices;
+}
+
+// ── Signal engine ────────────────────────────────────────────
 function rsiCalc(p,n=14){if(p.length<n+1)return 50;let g=0,l=0;for(let i=1;i<=n;i++){const d=p[i]-p[i-1];if(d>0)g+=d;else l-=d;}g/=n;l/=n;return l===0?100:100-100/(1+g/l);}
 function maCalc(p,n){if(p.length<n)return p[p.length-1]||0;return p.slice(-n).reduce((a,b)=>a+b,0)/n;}
 function getSignal(sym){
@@ -90,71 +134,97 @@ function getSignal(sym){
   return{signal,confidence,score,rsi:Math.round(r),ma7,ma20};
 }
 
-async function executeSwap(inputMint,outputMint,amount,slippageBps=50){
+function getBestSignal(type="BUY"){
+  let best=null;
+  for(const sym of["SOL","BONK","WIF","JUP","RAY"]){
+    const sig=getSignal(sym);
+    const match=type==="BUY"?(sig.signal==="STRONG BUY"||sig.signal==="BUY"):( sig.signal==="STRONG SELL"||sig.signal==="SELL");
+    if(match&&sig.confidence>=autoConfig.minConfidence){
+      if(!best||sig.confidence>best.confidence)best={sym,...sig};
+    }
+  }
+  return best;
+}
+
+// ── Execute swap ─────────────────────────────────────────────
+async function executeSwap(inputMint,outputMint,amount,slippageBps=100){
   if(!botPrivKey||!botPubKey)throw new Error("No bot keypair");
   const pubKeyB58=b58encode(botPubKey);
-  const quote=await get(`https://quote-api.jup.ag/v6/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=${slippageBps}`);
-  if(!quote||quote.error)throw new Error("Quote failed: "+(quote?.error||"unknown"));
-  const swapRes=await postJson("https://quote-api.jup.ag/v6/swap",{quoteResponse:quote,userPublicKey:pubKeyB58,wrapAndUnwrapSol:true,dynamicComputeUnitLimit:true,prioritizationFeeLamports:"auto"});
+
+  const{quote,host}=await jupQuote(inputMint,outputMint,amount,slippageBps);
+  const swapRes=await jupSwap(host,quote,pubKeyB58);
   if(!swapRes.swapTransaction)throw new Error("No swap tx: "+JSON.stringify(swapRes).slice(0,200));
+
   const txBuf=Buffer.from(swapRes.swapTransaction,"base64");
   const numSigs=txBuf[1];
-  const messageOffset=2+(numSigs*64);
-  const messageBytes=txBuf.slice(messageOffset);
+  const messageBytes=txBuf.slice(2+(numSigs*64));
   const sig=signEd25519(messageBytes,botPrivKey);
   const signedTx=Buffer.from(txBuf);
   sig.copy(signedTx,2,0,64);
-  const sendRes=await postJson(HELIUS_RPC,{jsonrpc:"2.0",id:1,method:"sendTransaction",params:[signedTx.toString("base64"),{encoding:"base64",skipPreflight:false,maxRetries:3}]},{});
+
+  const u=new URL(HELIUS_RPC);
+  const sendRes=await httpsPost(u.hostname,u.pathname+u.search,{jsonrpc:"2.0",id:1,method:"sendTransaction",params:[signedTx.toString("base64"),{encoding:"base64",skipPreflight:false,maxRetries:3}]});
   if(sendRes.error)throw new Error("Send failed: "+JSON.stringify(sendRes.error));
+
   const signature=sendRes.result;
   for(let i=0;i<30;i++){
     await new Promise(r=>setTimeout(r,2000));
-    const status=await postJson(HELIUS_RPC,{jsonrpc:"2.0",id:1,method:"getSignatureStatuses",params:[[signature]]},{});
+    const status=await httpsPost(u.hostname,u.pathname+u.search,{jsonrpc:"2.0",id:1,method:"getSignatureStatuses",params:[[signature]]});
     const s=status?.result?.value?.[0];
     if(s&&(s.confirmationStatus==="confirmed"||s.confirmationStatus==="finalized"))break;
     if(s?.err)throw new Error("Tx error: "+JSON.stringify(s.err));
   }
-  return{signature,explorerUrl:`https://solscan.io/tx/${signature}`,outAmount:quote.outAmount,priceImpactPct:quote.priceImpactPct};
+  return{signature,explorerUrl:`https://solscan.io/tx/${signature}`,outAmount:quote.outAmount};
 }
 
+// ── Auto trade loop ──────────────────────────────────────────
 async function runAutoTrade(){
   try{
-    const[SOL,ETH,BTC]=await Promise.all([fetchPrice("SOLUSDT"),fetchPrice("ETHUSDT"),fetchPrice("BTCUSDT")]);
-    if(SOL?.usd){priceHistory.SOL.push(SOL.usd);if(priceHistory.SOL.length>100)priceHistory.SOL.shift();}
-    if(ETH?.usd){priceHistory.ETH.push(ETH.usd);if(priceHistory.ETH.length>100)priceHistory.ETH.shift();}
-    if(BTC?.usd){priceHistory.BTC.push(BTC.usd);if(priceHistory.BTC.length>100)priceHistory.BTC.shift();}
-    const price=SOL?.usd||0;
-    const sig=getSignal("SOL");
-    const entry={time:new Date().toISOString(),price,signal:sig.signal,confidence:sig.confidence,rsi:sig.rsi,action:"WATCHING"};
+    const allPrices=await fetchAllPrices();
+    for(const[sym,price] of Object.entries(allPrices)){
+      if(price?.usd&&priceHistory[sym]!==undefined){priceHistory[sym].push(price.usd);if(priceHistory[sym].length>100)priceHistory[sym].shift();}
+    }
+    const price=allPrices.SOL?.usd||0;
+    const solSig=getSignal("SOL");
+    const entry={time:new Date().toISOString(),price,signal:solSig.signal,confidence:solSig.confidence,rsi:solSig.rsi,action:"WATCHING"};
+
     if(lastBuyPrice>0&&price>0){
-      const pnlPct=((price-lastBuyPrice)/lastBuyPrice)*100;
-      entry.pnlPct=+pnlPct.toFixed(3);
+      const curPrice=allPrices[lastBuyToken]?.usd||price;
+      const pnlPct=((curPrice-lastBuyPrice)/lastBuyPrice)*100;
+      entry.pnlPct=+pnlPct.toFixed(3);entry.position=lastBuyToken;
       if(pnlPct>=autoConfig.takeProfitPct||pnlPct<=-autoConfig.stopLossPct){
         const label=pnlPct>=autoConfig.takeProfitPct?"TAKE_PROFIT":"STOP_LOSS";
         entry.action=label;
         try{
+          const tokenMint=TOKENS[lastBuyToken]||TOKENS.SOL;
           const solBal=await rpc("getBalance",[b58encode(botPubKey)]);
-          const solLamports=Math.floor((solBal.result?.value||0)*0.92);
-          if(solLamports>5000){
-            const result=await executeSwap(TOKENS.SOL,TOKENS.USDC,solLamports,autoConfig.slippageBps);
+          const lamports=Math.floor((solBal.result?.value||0)*0.92);
+          if(lamports>5000){
+            const result=await executeSwap(tokenMint,TOKENS.USDC,lamports,autoConfig.slippageBps);
             totalPnl+=(pnlPct/100)*autoConfig.amount/1e6;
             entry.action=label+"_DONE";entry.signature=result.signature;entry.explorerUrl=result.explorerUrl;entry.type="SELL";
-            lastBuyPrice=0;tradeCount++;
+            lastBuyPrice=0;lastBuyToken="SOL";tradeCount++;
             console.log(`[BOT] ✅ ${label} | ${result.signature}`);
           }
-        }catch(e){entry.action=label+"_FAILED";entry.error=e.message;console.log(`[BOT] ❌`,e.message);}
+        }catch(e){entry.action=label+"_FAILED";entry.error=e.message;}
       }
     }
-    if(lastBuyPrice===0&&sig.signal==="STRONG BUY"&&sig.confidence>=autoConfig.minConfidence){
-      entry.action="BUYING";
-      try{
-        const result=await executeSwap(TOKENS.USDC,TOKENS.SOL,autoConfig.amount,autoConfig.slippageBps);
-        lastBuyPrice=price;entry.action="BOUGHT";entry.signature=result.signature;entry.explorerUrl=result.explorerUrl;entry.type="BUY";tradeCount++;
-        console.log(`[BOT] ✅ BOUGHT at $${price} | ${result.signature}`);
-      }catch(e){entry.action="BUY_FAILED";entry.error=e.message;console.log("[BOT] ❌ Buy failed:",e.message);}
+
+    if(lastBuyPrice===0){
+      const best=getBestSignal("BUY");
+      if(best){
+        entry.action=`BUYING ${best.sym}`;
+        try{
+          const result=await executeSwap(TOKENS.USDC,TOKENS[best.sym]||TOKENS.SOL,autoConfig.amount,autoConfig.slippageBps);
+          lastBuyPrice=allPrices[best.sym]?.usd||price;lastBuyToken=best.sym;
+          entry.action=`BOUGHT ${best.sym}`;entry.signature=result.signature;entry.explorerUrl=result.explorerUrl;entry.type="BUY";entry.token=best.sym;tradeCount++;
+          console.log(`[BOT] ✅ BOUGHT ${best.sym} at $${lastBuyPrice} | ${result.signature}`);
+        }catch(e){entry.action=`BUY_${best.sym}_FAILED`;entry.error=e.message;console.log(`[BOT] ❌`,e.message);}
+      }
     }
+
     tradeLog.unshift(entry);tradeLog=tradeLog.slice(0,200);
-    console.log(`[BOT] $${price} | ${sig.signal} ${sig.confidence}% | ${entry.action}`);
+    console.log(`[BOT] SOL $${price} | ${solSig.signal} ${solSig.confidence}% | ${entry.action}`);
   }catch(e){console.log("[BOT ERROR]",e.message);}
 }
 
@@ -167,28 +237,31 @@ function out(r,d,s=200){cors(r);r.writeHead(s,{"Content-Type":"application/json"
 http.createServer(async(req,res)=>{
   if(req.method==="OPTIONS"){cors(res);res.writeHead(204);res.end();return;}
   const u=new URL(req.url,"http://x"),p=u.pathname;
-  if(p==="/health")return out(res,{ok:true,exchange:"jupiter+helius",botWallet:botPubKey?b58encode(botPubKey):"NOT LOADED",autoTrading,tradeCount,totalPnl:+totalPnl.toFixed(4),lastBuyPrice,ts:new Date().toISOString()});
+
+  if(p==="/health")return out(res,{ok:true,exchange:"jupiter+helius",botWallet:botPubKey?b58encode(botPubKey):"NOT LOADED",autoTrading,tradeCount,totalPnl:+totalPnl.toFixed(4),lastBuyPrice,lastBuyToken,ts:new Date().toISOString()});
+
   if(p==="/prices"){
-    try{
-      const[S,E,B]=await Promise.all([fetchPrice("SOLUSDT"),fetchPrice("ETHUSDT"),fetchPrice("BTCUSDT")]);
-      if(S?.usd)priceHistory.SOL.push(S.usd);
-      if(E?.usd)priceHistory.ETH.push(E.usd);
-      if(B?.usd)priceHistory.BTC.push(B.usd);
-      return out(res,{success:true,prices:{SOL:S,ETH:E,BTC:B}});
-    }catch(e){return out(res,{success:false,error:e.message});}
+    try{const all=await fetchAllPrices();for(const[sym,price] of Object.entries(all)){if(price?.usd&&priceHistory[sym]!==undefined){priceHistory[sym].push(price.usd);if(priceHistory[sym].length>100)priceHistory[sym].shift();}}return out(res,{success:true,prices:all});}
+    catch(e){return out(res,{success:false,error:e.message});}
   }
-  if(p==="/klines"){const s=u.searchParams.get("symbol")||"SOLUSDT";return out(res,{success:true,candles:await binanceKlines(s,u.searchParams.get("interval")||"1h",+(u.searchParams.get("limit")||60))});}
+
   if(p==="/signal"){const s=u.searchParams.get("symbol")||"SOL";return out(res,{success:true,...getSignal(s)});}
   if(p==="/account"){const w=u.searchParams.get("wallet")||(botPubKey?b58encode(botPubKey):null);if(!w)return out(res,{success:false,error:"Pass ?wallet=ADDRESS"});try{const r=await rpc("getBalance",[w]);const bal=(r.result?.value||0)/1e9;return out(res,{success:true,balances:[{asset:"SOL",free:bal,locked:0,total:bal}],wallet:w});}catch(e){return out(res,{success:false,error:e.message});}}
+
   if(p==="/auto/start"){
     if(req.method==="POST"){let b="";req.on("data",c=>b+=c);req.on("end",()=>{try{const cfg=JSON.parse(b||"{}");Object.assign(autoConfig,cfg);}catch{}startAuto();out(res,{success:true,message:"🤖 STARTED",config:autoConfig,botWallet:botPubKey?b58encode(botPubKey):"none"});});}
     else{startAuto();out(res,{success:true,message:"🤖 STARTED",config:autoConfig,botWallet:botPubKey?b58encode(botPubKey):"none"});}
     return;
   }
   if(p==="/auto/stop"){stopAuto();return out(res,{success:true,message:"🛑 STOPPED",tradeCount,totalPnl});}
-  if(p==="/auto/status")return out(res,{success:true,autoTrading,config:autoConfig,tradeCount,totalPnl:+totalPnl.toFixed(4),lastBuyPrice,log:tradeLog.slice(0,30),signals:{SOL:getSignal("SOL"),ETH:getSignal("ETH"),BTC:getSignal("BTC")},botWallet:botPubKey?b58encode(botPubKey):"none"});
+  if(p==="/auto/status"){
+    const allSigs={};for(const sym of Object.keys(priceHistory))allSigs[sym]=getSignal(sym);
+    return out(res,{success:true,autoTrading,config:autoConfig,tradeCount,totalPnl:+totalPnl.toFixed(4),lastBuyPrice,lastBuyToken,log:tradeLog.slice(0,30),signals:allSigs,botWallet:botPubKey?b58encode(botPubKey):"none"});
+  }
   if(p==="/auto/log")return out(res,{success:true,log:tradeLog});
   if(p==="/trades")return out(res,{success:true,trades:tradeLog.filter(t=>t.type),tradeCount,totalPnl});
-  if(p==="/order"&&req.method==="POST"){let b="";req.on("data",c=>b+=c);req.on("end",async()=>{try{const{symbol,side,quantity,userPublicKey}=JSON.parse(b);const sym=symbol.replace("USDT","");const inputMint=side==="BUY"?TOKENS.USDC:(TOKENS[sym]||TOKENS.SOL);const outputMint=side==="BUY"?(TOKENS[sym]||TOKENS.SOL):TOKENS.USDC;const amount=Math.floor(quantity*(side==="BUY"?1e6:1e9));if(userPublicKey){const quote=await get(`https://quote-api.jup.ag/v6/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=50`);const swapRes=await postJson("https://quote-api.jup.ag/v6/swap",{quoteResponse:quote,userPublicKey,wrapAndUnwrapSol:true,dynamicComputeUnitLimit:true,prioritizationFeeLamports:"auto"});return out(res,{success:true,swapTransaction:swapRes.swapTransaction,quote,mode:"frontend-sign"});}const result=await executeSwap(inputMint,outputMint,amount);out(res,{success:true,...result,mode:"bot-sign"});}catch(e){out(res,{success:false,error:e.message});}});return;}
+
+  if(p==="/order"&&req.method==="POST"){let b="";req.on("data",c=>b+=c);req.on("end",async()=>{try{const{symbol,side,quantity,userPublicKey}=JSON.parse(b);const sym=symbol.replace("USDT","");const inputMint=side==="BUY"?TOKENS.USDC:(TOKENS[sym]||TOKENS.SOL);const outputMint=side==="BUY"?(TOKENS[sym]||TOKENS.SOL):TOKENS.USDC;const amount=Math.floor(quantity*(side==="BUY"?1e6:1e9));if(!userPublicKey)return out(res,{success:false,error:"Need userPublicKey"});const{quote,host}=await jupQuote(inputMint,outputMint,amount,50);const swapRes=await jupSwap(host,quote,userPublicKey);out(res,{success:true,swapTransaction:swapRes.swapTransaction,quote,mode:"frontend-sign"});}catch(e){out(res,{success:false,error:e.message});}});return;}
+
   out(res,{error:"Not found"},404);
 }).listen(PORT,()=>console.log(`Quantifesta Bot running on port ${PORT}`));
