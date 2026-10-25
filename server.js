@@ -284,6 +284,10 @@ init();
 </html>`;
 
 const PORT = process.env.PORT || 3000;
+const SELF_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
+setInterval(()=>{
+  try{const u=new URL(SELF_URL+"/health");const mod=u.protocol==="https:"?https:http;mod.get({hostname:u.hostname,path:u.pathname,port:u.port||undefined,headers:{"User-Agent":"keepalive"}},()=>{}).on("error",()=>{});}catch(e){}
+},9*60*1000);
 const HELIUS_RPC = process.env.HELIUS_RPC || "https://mainnet.helius-rpc.com/?api-key=5887995d-86e5-4f50-8558-c53a988d4ec2";
 const JUP_API_KEY = process.env.JUP_API_KEY || "jup_4e01628c96dcadffcf9d5ab360837152bdfc984674151b077d280b7107d9f315";
 const BOT_PRIVATE_KEY = process.env.BOT_PRIVATE_KEY || "";
@@ -319,7 +323,7 @@ const CG_IDS={SOL:"solana",ETH:"ethereum",BTC:"bitcoin",BONK:"bonk",WIF:"dogwifc
 const JUP_QUOTE_HOSTS=["quote-api.jup.ag","jupiter-swap-api.quiknode.pro","jup.ag"];
 
 let autoTrading=false,autoInterval=null,tradeLog=[],tradeCount=0,totalPnl=0,lastBuyPrice=0,lastBuyToken="SOL";
-let autoConfig={amount:1000000,slippageBps:100,intervalSecs:60,takeProfitPct:3,stopLossPct:2,minConfidence:75};
+let autoConfig={amount:1000000,slippageBps:100,intervalSecs:60,takeProfitPct:3,stopLossPct:2,minConfidence:60};
 const priceHistory={SOL:[],ETH:[],BTC:[],BONK:[],WIF:[],JUP:[],PYTH:[],RAY:[],ORCA:[]};
 
 function httpsGet(hostname,path,headers={}){
