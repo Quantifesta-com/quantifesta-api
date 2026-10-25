@@ -143,6 +143,7 @@ main{display:grid;grid-template-columns:260px 1fr;gap:0;}
     <div class="lbl">BOT WALLET</div>
     <div class="addr" id="walletAddr">Loading...</div>
     <div class="bal" id="walletBal">— SOL</div>
+    <div class="bal" id="walletUsdc" style="font-size:13px;color:var(--teal);margin-top:3px">— USDC</div>
   </div>
   <div style="font-size:9px;color:var(--muted);text-align:center" id="lastUpdate">—</div>
 </div>
@@ -189,7 +190,16 @@ async function fetchPrices(){
 }
 async function fetchWalletBal(){
   if(!state.botWallet||state.botWallet==="NOT LOADED")return;
-  try{const r=await fetch(API+"/account?wallet="+state.botWallet);const d=await r.json();if(d.success&&d.balances?.[0])document.getElementById("walletBal").textContent=d.balances[0].total.toFixed(4)+" SOL";}catch(e){}
+  try{
+    const r=await fetch(API+"/account?wallet="+state.botWallet);
+    const d=await r.json();
+    if(d.success&&d.balances){
+      const sol=d.balances.find(b=>b.asset==="SOL");
+      const usdc=d.balances.find(b=>b.asset==="USDC");
+      if(sol)document.getElementById("walletBal").textContent=sol.total.toFixed(4)+" SOL";
+      if(usdc)document.getElementById("walletUsdc").textContent=usdc.total.toFixed(2)+" USDC";
+    }
+  }catch(e){}
 }
 async function toggleBot(){
   const btn=document.getElementById("startBtn");btn.disabled=true;
@@ -519,7 +529,13 @@ http.createServer(async(req,res)=>{
   }
 
   if(p==="/signal"){const s=u.searchParams.get("symbol")||"SOL";return out(res,{success:true,...getSignal(s)});}
-  if(p==="/account"){const w=u.searchParams.get("wallet")||(botPubKey?b58encode(botPubKey):null);if(!w)return out(res,{success:false,error:"Pass ?wallet=ADDRESS"});try{const r=await rpc("getBalance",[w]);const bal=(r.result?.value||0)/1e9;return out(res,{success:true,balances:[{asset:"SOL",free:bal,locked:0,total:bal}],wallet:w});}catch(e){return out(res,{success:false,error:e.message});}}
+  if(p==="/account"){const w=u.searchParams.get("wallet")||(botPubKey?b58encode(botPubKey):null);if(!w)return out(res,{success:false,error:"Pass ?wallet=ADDRESS"});try{
+    const solR=await rpc("getBalance",[w]);
+    const solBal=(solR.result?.value||0)/1e9;
+    const tokR=await rpc("getTokenAccountsByOwner",[w,{mint:TOKENS.USDC},{encoding:"jsonParsed"}]);
+    const usdcRaw=tokR.result?.value?.[0]?.account?.data?.parsed?.info?.tokenAmount?.uiAmount||0;
+    return out(res,{success:true,balances:[{asset:"SOL",free:solBal,locked:0,total:solBal},{asset:"USDC",free:usdcRaw,locked:0,total:usdcRaw}],wallet:w});
+  }catch(e){return out(res,{success:false,error:e.message});}}
 
   if(p==="/auto/start"){
     if(req.method==="POST"){let b="";req.on("data",c=>b+=c);req.on("end",()=>{try{const cfg=JSON.parse(b||"{}");Object.assign(autoConfig,cfg);}catch{}startAuto();out(res,{success:true,message:"🤖 STARTED",config:autoConfig,botWallet:botPubKey?b58encode(botPubKey):"none"});});}
