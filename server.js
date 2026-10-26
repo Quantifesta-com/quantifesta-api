@@ -557,7 +557,7 @@ http.createServer(async(req,res)=>{
     if(!botPubKey)return out(res,{success:false,error:"Bot key not loaded"});
     (async()=>{
       try{
-        log("FORCE_BUY","SOL",0,"TESTING JUPITER");
+        tradeLog.unshift({time:new Date().toISOString(),action:"FORCE_BUY_ATTEMPT",price:0,signal:"MANUAL"});
         const result=await executeSwap(TOKENS.USDC,TOKENS.SOL,1000000,200);
         if(result.signature){
           const url="https://solscan.io/tx/"+result.signature;
