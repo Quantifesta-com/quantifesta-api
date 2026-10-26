@@ -403,7 +403,7 @@ function rsiCalc(p,n=14){if(p.length<n+1)return 50;let g=0,l=0;for(let i=1;i<=n;
 function maCalc(p,n){if(p.length<n)return p[p.length-1]||0;return p.slice(-n).reduce((a,b)=>a+b,0)/n;}
 function getSignal(sym){
   const ph=priceHistory[sym]||[];
-  if(ph.length<5)return{signal:"NEUTRAL",confidence:40,score:0,rsi:50};
+  if(ph.length<2)return{signal:"NEUTRAL",confidence:40,score:0,rsi:50};
   const r=rsiCalc(ph),ma7=maCalc(ph,Math.min(7,ph.length)),ma20=maCalc(ph,Math.min(20,ph.length));
   let score=0;
   if(r<25)score+=35;else if(r<35)score+=20;else if(r<45)score+=10;
@@ -552,6 +552,23 @@ http.createServer(async(req,res)=>{
     return out(res,{success:true,autoTrading,config:autoConfig,tradeCount,totalPnl:+totalPnl.toFixed(4),lastBuyPrice,lastBuyToken,log:tradeLog.slice(0,30),signals:allSigs,botWallet:botPubKey?b58encode(botPubKey):"none"});
   }
   if(p==="/auto/log")return out(res,{success:true,log:tradeLog});
+  if(p==="/auto/force"){
+    // Force a test buy of SOL with 1 USDC — bypasses signal check, tests Jupiter directly
+    if(!botPubKey)return out(res,{success:false,error:"Bot key not loaded"});
+    (async()=>{
+      try{
+        log("FORCE_BUY","SOL",0,"TESTING JUPITER");
+        const result=await executeSwap(TOKENS.USDC,TOKENS.SOL,1000000,200);
+        if(result.signature){
+          const url="https://solscan.io/tx/"+result.signature;
+          tradeLog.unshift({time:new Date().toISOString(),action:"FORCE_BUY_SOL",explorerUrl:url,signature:result.signature});
+          return out(res,{success:true,message:"Force buy executed!",signature:result.signature,explorerUrl:url});
+        }
+        out(res,{success:false,error:result.error||"No signature"});
+      }catch(e){out(res,{success:false,error:e.message});}
+    })();
+    return;
+  }
   if(p==="/trades")return out(res,{success:true,trades:tradeLog.filter(t=>t.type),tradeCount,totalPnl});
 
   if(p==="/order"&&req.method==="POST"){let b="";req.on("data",c=>b+=c);req.on("end",async()=>{try{const{symbol,side,quantity,userPublicKey}=JSON.parse(b);const sym=symbol.replace("USDT","");const inputMint=side==="BUY"?TOKENS.USDC:(TOKENS[sym]||TOKENS.SOL);const outputMint=side==="BUY"?(TOKENS[sym]||TOKENS.SOL):TOKENS.USDC;const amount=Math.floor(quantity*(side==="BUY"?1e6:1e9));if(!userPublicKey)return out(res,{success:false,error:"Need userPublicKey"});const{quote,host}=await jupQuote(inputMint,outputMint,amount,50);const swapRes=await jupSwap(host,quote,userPublicKey);out(res,{success:true,swapTransaction:swapRes.swapTransaction,quote,mode:"frontend-sign"});}catch(e){out(res,{success:false,error:e.message});}});return;}
