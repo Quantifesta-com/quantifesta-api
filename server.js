@@ -4,12 +4,12 @@ const http = require("http"), https = require("https"), crypto = require("crypto
 
 // ── Config: ALL secrets come from environment variables only ──
 const PORT = process.env.PORT || 3000;
-const RPC_URL = process.env.HELIUS_RPC || "https://api.mainnet-beta.solana.com";
-const JUP_API_KEY = process.env.JUP_API_KEY || "";
-const BOT_PRIVATE_KEY = process.env.BOT_PRIVATE_KEY || "";
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
-const DATABASE_URL = process.env.DATABASE_URL || "";
-const PAPER_MODE = String(process.env.PAPER_MODE || "true").toLowerCase() !== "false";
+const RPC_URL = (process.env.HELIUS_RPC || "").trim() || "https://api.mainnet-beta.solana.com";
+const JUP_API_KEY = (process.env.JUP_API_KEY || "").trim();
+const BOT_PRIVATE_KEY = (process.env.BOT_PRIVATE_KEY || "").trim();
+const ADMIN_TOKEN = (process.env.ADMIN_TOKEN || "").trim();
+const DATABASE_URL = (process.env.DATABASE_URL || "").trim();
+const PAPER_MODE = String(process.env.PAPER_MODE || "true").trim().toLowerCase() !== "false";
 const MAX_TRADE_USD = Number(process.env.MAX_TRADE_USD || 5);
 const log = (...a) => console.log("[QF]", ...a);
 
@@ -307,11 +307,11 @@ function authed(req, strict) {
   const ip = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").split(",")[0].trim();
   const rec = failedAuth.get(ip) || { n: 0, t: Date.now() };
   if (Date.now() - rec.t > 600000) { rec.n = 0; rec.t = Date.now(); }
-  if (rec.n >= 10) return false;
+  if (rec.n >= 10) { log("Auth locked out for this IP (10 failed tries, resets after 10 min)"); return false; }
   const h = String(req.headers["x-admin-token"] || (req.headers.authorization || "").replace(/^Bearer\s+/i, ""));
   const a = Buffer.from(h), b = Buffer.from(ADMIN_TOKEN);
   const ok = a.length === b.length && crypto.timingSafeEqual(a, b);
-  if (!ok) { rec.n++; failedAuth.set(ip, rec); }
+  if (!ok) { rec.n++; failedAuth.set(ip, rec); log("Auth failed: sent " + h.length + " chars, server expects " + ADMIN_TOKEN.length + " chars (attempt " + rec.n + "/10)"); }
   return ok;
 }
 function cors(r) { r.setHeader("Access-Control-Allow-Origin", "*"); r.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS"); r.setHeader("Access-Control-Allow-Headers", "Content-Type,x-admin-token,Authorization"); }
