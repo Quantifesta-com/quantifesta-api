@@ -300,8 +300,10 @@ function restartLoop() { if (timer) clearInterval(timer); timer = setInterval(ti
 
 // ── Auth & HTTP plumbing ──
 const failedAuth = new Map();
-function authed(req) {
-  if (!ADMIN_TOKEN) return false;
+function authed(req, strict) {
+  // Paper mode with no token set: controls are open, since nothing real can be spent.
+  // LIVE mode, or strict endpoints (/order), always require ADMIN_TOKEN.
+  if (!ADMIN_TOKEN) return PAPER_MODE && !strict;
   const ip = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").split(",")[0].trim();
   const rec = failedAuth.get(ip) || { n: 0, t: Date.now() };
   if (Date.now() - rec.t > 600000) { rec.n = 0; rec.t = Date.now(); }
@@ -320,7 +322,7 @@ function readBody(req) {
     req.on("end", () => { try { res(b ? JSON.parse(b) : {}); } catch { rej(new Error("bad JSON")); } });
   });
 }
-const needAuth = (req, res) => { if (authed(req)) return true; out(res, { success: false, error: ADMIN_TOKEN ? "Unauthorized" : "Controls disabled: set ADMIN_TOKEN" }, ADMIN_TOKEN ? 401 : 403); return false; };
+const needAuth = (req, res, strict) => { if (authed(req, strict)) return true; out(res, { success: false, error: ADMIN_TOKEN ? "Unauthorized" : "Controls disabled: set ADMIN_TOKEN" }, ADMIN_TOKEN ? 401 : 403); return false; };
 const statusPayload = () => {
   const sigs = {}; for (const s of Object.keys(HIST)) sigs[s] = getSignal(s);
   return { success: true, mode: PAPER_MODE ? "PAPER" : "LIVE", autoTrading: S.autoTrading, config: cfg, tradeCount: S.tradeCount, dayTrades: S.dayTrades, totalPnl: +S.totalPnl.toFixed(4), position: S.position, log: S.log.slice(0, 40), signals: sigs, samples: HIST.SOL.length, minSamples: MIN_SAMPLES, botWallet: botAddr || "", hasWallet: !!botPriv, persisted: !!pool };
@@ -362,7 +364,7 @@ async function route(req, res) {
     catch (e) { return out(res, { success: false, error: e.message }, 400); }
   }
   if (p === "/order" && req.method === "POST") {
-    if (!needAuth(req, res)) return;
+    if (!needAuth(req, res, true)) return;
     try {
       const { symbol, side, quantity, userPublicKey } = await readBody(req);
       const sym = String(symbol || "").replace("USDT", "");
@@ -442,7 +444,6 @@ async function status(){try{var d=await getJSON("/auto/status");if(d.success){S=
 async function prices(){try{var d=await getJSON("/prices");if(d.success){P=d.prices;render()}}catch(e){}}
 async function wallet(){if(!S.hasWallet)return;try{var d=await getJSON("/account");if(d.success){bal=d.balances;render()}}catch(e){}}
 async function toggle(){
-  if(!TOKEN){msg("Enter your admin token first");return}
   $("go").disabled=true;msg("");
   try{var r=await fetch(S.autoTrading?"/auto/stop":"/auto/start",{method:"POST",headers:{"Content-Type":"application/json","x-admin-token":TOKEN},body:"{}"});
   var d=await r.json();if(!d.success)msg(d.error||"Failed")}catch(e){msg("Network error")}
